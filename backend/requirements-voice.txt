@@ -1,0 +1,15 @@
+# Phase-2 voice deps — install when you start the voice TODOs:
+#   pip install -r requirements-voice.txt
+#
+# STT (Groq Whisper) reuses the `groq` package from requirements-providers.txt — no extra dep.
+# The echo STT/TTS adapters need NONE of the below; they run the pipeline at $0.
+
+# TTS — Kokoro (Apache-2.0, local, 24kHz). First run downloads model weights.
+kokoro>=0.9
+numpy>=1.26            # Kokoro adapter converts float32 audio -> PCM16
+
+# Turn detection (TODO #1) — Silero VAD (MIT) + Smart-Turn v3 (BSD-2).
+silero-vad>=5.1
+onnxruntime>=1.19      # run Smart-Turn v3 torch-free on CPU
+# smart-turn weights: see https://github.com/pipecat-ai/smart-turn (bundled with pipecat, or
+# grab the ONNX export). Keep it CPU/torch-free to stay light.

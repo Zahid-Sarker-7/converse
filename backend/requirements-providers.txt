@@ -1,0 +1,5 @@
+# Provider SDKs — install these when you start the adapter TODOs:
+#   pip install -r requirements-providers.txt
+groq>=0.11
+google-genai>=0.3
+# anthropic>=0.39   # optional, for a future (paid) Claude adapter

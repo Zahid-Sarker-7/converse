@@ -1,0 +1,19 @@
+# Python
+backend/.venv/
+backend/.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+next-env.d.ts
+
+# misc
+.DS_Store
+
+# -- Portfolio screenshots (keep private) --
+portfolio/

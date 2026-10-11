@@ -1,0 +1,193 @@
+@import "tailwindcss";
+
+/* ---- Design tokens: Tailwind v4 CSS-first @theme (generates color + radius utilities) ---- */
+@theme {
+  --color-bg: #0a0b12;
+  --color-surface: #12141f;
+  --color-surface-2: #171a28;
+  --color-border: #262b40;
+  --color-text: #e7e9f3;
+  --color-muted: #99a0bd;
+  --color-accent: #8b7cff;
+  --color-accent-2: #4fd1e6;
+  --color-ok: #45d483;
+  --color-warn: #ffb454;
+  --color-danger: #ff6b6b;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 28px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+}
+
+/* ---- Aurora backdrop (fixed, behind everything) ---- */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      40rem 40rem at 15% 8%,
+      rgba(139, 124, 255, 0.18),
+      transparent 60%
+    ),
+    radial-gradient(
+      35rem 35rem at 85% 18%,
+      rgba(79, 209, 230, 0.14),
+      transparent 60%
+    ),
+    radial-gradient(
+      45rem 45rem at 50% 105%,
+      rgba(139, 124, 255, 0.1),
+      transparent 60%
+    );
+}
+.aurora::before,
+.aurora::after {
+  content: "";
+  position: absolute;
+  width: 45rem;
+  height: 45rem;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+}
+.aurora::before {
+  background: radial-gradient(
+    circle,
+    rgba(139, 124, 255, 0.5),
+    transparent 65%
+  );
+  top: -12rem;
+  left: -8rem;
+  animation: drift1 22s ease-in-out infinite;
+}
+.aurora::after {
+  background: radial-gradient(circle, rgba(79, 209, 230, 0.4), transparent 65%);
+  bottom: -14rem;
+  right: -10rem;
+  animation: drift2 26s ease-in-out infinite;
+}
+@keyframes drift1 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(6rem, 4rem) scale(1.15);
+  }
+}
+@keyframes drift2 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-5rem, -3rem) scale(1.1);
+  }
+}
+
+/* ---- Glass surface ---- */
+.glass {
+  background: color-mix(in oklab, var(--color-surface) 70%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid color-mix(in oklab, var(--color-border) 85%, transparent);
+}
+
+/* ---- Gradient text ---- */
+.text-gradient {
+  background: linear-gradient(
+    100deg,
+    var(--color-text),
+    var(--color-accent) 55%,
+    var(--color-accent-2)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---- Shimmer skeleton ---- */
+.shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--color-surface) 30%,
+    var(--color-surface-2) 50%,
+    var(--color-surface) 70%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* ---- Streaming cursor (append to streaming text) ---- */
+.cursor-blink::after {
+  content: "▋";
+  margin-left: 2px;
+  color: var(--color-accent);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---- Accessibility: visible focus ---- */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---- Respect reduced motion (covers CSS anims; motion lib gated via MotionConfig) ---- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---- Scrollbars ---- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #33395a;
+}

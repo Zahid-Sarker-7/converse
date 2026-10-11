@@ -1,0 +1,8 @@
+# Core runtime — everything the app needs to boot and run the echo provider ($0, no keys).
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.5
+python-dotenv>=1.0
+structlog>=24.4
+langgraph>=1.2  # Phase 1 multi-agent orchestration (agents/graph.py)
