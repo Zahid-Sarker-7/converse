@@ -54,6 +54,24 @@ Other targets: `make backend`, `make frontend`, `make stop`, `make health`, `mak
 
 > `uv` works too: `cd backend && uv venv && uv pip install -r requirements-dev.txt`.
 
+### Voice (Phase 2)
+
+Speak to the persona over a WebSocket: turn detection (Silero VAD + Smart-Turn v3, local ONNX)
+→ STT (Groq Whisper) → the same LangGraph loop → TTS, with barge-in and delivery metrics.
+
+```bash
+make providers voice     # Groq SDK + onnxruntime; downloads the two turn-detection models
+make backend             # terminal 1 — watch the per-step logs
+cd backend               # terminal 2 — a scripted "mic" over the real WebSocket:
+say -o /tmp/me.wav --data-format=LEI16@16000 "Um, so I led the migration. [[slnc 1500]] It was hard."
+.venv/bin/python scripts/voice_client.py /tmp/me.wav --stt groq   # prints events + metrics
+```
+
+Defaults are `VOICE_STT_PROVIDER=echo` / `VOICE_TTS_PROVIDER=echo` ($0, no keys, silent audio).
+Real speech out needs Kokoro: `pip install kokoro` in a Python 3.12/3.13 venv (its spacy
+dependency doesn't build on 3.14); it auto-registers as `--tts kokoro`.
+Browser origins must be in `CORS_ORIGINS` (the WebSocket checks `Origin`; CORS alone doesn't).
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -63,6 +81,8 @@ Other targets: `make backend`, `make frontend`, `make stop`, `make health`, `mak
 | GET | `/api/roleplay/sample` | a ready-to-use `ScenarioConfig` |
 | POST | `/api/roleplay/turn` | one learner turn → in-character persona reply |
 | POST | `/api/roleplay/score` | grade a transcript → rubric `Scorecard` |
+| WS | `/api/voice/session` | voice session: JSON config → PCM16@16k mic up; events + PCM16@24k speech down; `{"type":"end"}` → delivery metrics |
+| GET | `/api/voice/providers` | STT/TTS adapter readiness |
 
 Interactive API docs at <http://localhost:8000/docs>. Current implementation status per
 endpoint is tracked in [`TDD.md`](TDD.md) §4.

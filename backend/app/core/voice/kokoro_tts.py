@@ -13,6 +13,7 @@ Docs: https://github.com/hexgrad/kokoro
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import numpy as np
@@ -37,9 +38,12 @@ class KokoroTTS(TTSPort):
         *,
         voice: str | None = None,
     ) -> AsyncIterator[AudioChunk]:
-        # KPipeline yields (graphemes, phonemes, audio) per internal segment. `audio` is a
-        # float32 numpy array in [-1, 1] at 24 kHz; convert to PCM16 bytes for the wire.
-        for _gs, _ps, audio in self._pipeline(text, voice=voice or self.default_voice):
+        # KPipeline yields (graphemes, phonemes, audio) per internal segment; `audio` is float32
+        # in [-1, 1] at 24 kHz. Synthesis is seconds of CPU work, so each segment runs in a thread:
+        # on the event loop it would freeze mic reading and make barge-in impossible.
+        segments = iter(self._pipeline(text, voice=voice or self.default_voice))
+        while (seg := await asyncio.to_thread(next, segments, None)) is not None:
+            _gs, _ps, audio = seg
             pcm16 = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
             yield AudioChunk(pcm=pcm16, sample_rate=TTS_SAMPLE_RATE)
         yield AudioChunk(done=True)

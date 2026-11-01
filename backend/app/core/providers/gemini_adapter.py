@@ -37,9 +37,7 @@ class GeminiAdapter(ModelPort):
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> AsyncIterator[StreamChunk]:
-        system_text = (
-            "\n".join(m.content for m in messages if m.role == Role.system) or None
-        )
+        system_text = "\n".join(m.content for m in messages if m.role == Role.system) or None
         # Interactions `input`: a list of typed turns (plain-text only here; add
         # image/tool blocks when a later phase needs them).
         history = [
@@ -76,9 +74,7 @@ class GeminiAdapter(ModelPort):
         *,
         model: str | None = None,
     ):
-        system_text = (
-            "\n".join(m.content for m in messages if m.role == Role.system) or None
-        )
+        system_text = "\n".join(m.content for m in messages if m.role == Role.system) or None
         history = [
             {
                 "type": "model_output" if m.role == Role.assistant else "user_input",
@@ -96,8 +92,6 @@ class GeminiAdapter(ModelPort):
                 "type": "text",
                 "mime_type": "application/json",
                 "schema": schema.model_json_schema(),
-            }
+            },
         )
         return schema.model_validate_json(output.output_text)
-
-

@@ -27,8 +27,13 @@ setup-frontend: ## install frontend deps, seed .env.local
 providers: ## install provider SDKs (do this when starting the adapter TODOs)
 	$(BIN)/pip install -r $(BACKEND)/requirements-providers.txt
 
-voice: ## install Phase-2 voice deps (Kokoro TTS + Silero/Smart-Turn) for the voice TODOs
+voice: ## install voice deps (onnxruntime) + download the Silero & Smart-Turn models
 	$(BIN)/pip install -r $(BACKEND)/requirements-voice.txt
+	@mkdir -p $(BACKEND)/models
+	@test -f $(BACKEND)/models/silero_vad.onnx || curl -sL -o $(BACKEND)/models/silero_vad.onnx \
+		https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+	@test -f $(BACKEND)/models/smart-turn-v3.2-cpu.onnx || curl -sL -o $(BACKEND)/models/smart-turn-v3.2-cpu.onnx \
+		https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx
 
 backend: ## run FastAPI with reload (http://localhost:8000)
 	cd $(BACKEND) && .venv/bin/uvicorn app.main:app --reload --port 8000

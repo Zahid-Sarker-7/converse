@@ -87,7 +87,7 @@ from .schemas import ScenarioConfig, Scorecard
 
 
 # ── T1: Define the graph state ────────────────────────────────────────────────
-# ### TODO: ConverseState   [track: C-project]  [status: todo]
+# ### TODO: ConverseState   [track: C-project]  [status: done]
 # - What:  a TypedDict the graph threads through. Fields you need:
 #            scenario (ScenarioConfig) · messages (list[ChatMessage]) ·
 #            mode ("chat"|"score") · director_note (str|None) · scorecard (Scorecard|None)
@@ -100,6 +100,7 @@ from .schemas import ScenarioConfig, Scorecard
 # - Docs:  https://docs.langchain.com/oss/python/langgraph/use-graph-api  (State, Reducers)
 # - Accept: `from app.agents.graph import ConverseState` imports; messages field is annotated.
 
+
 class ConverseState(TypedDict, total=False):
     scenario: ScenarioConfig
     messages: Annotated[list[ChatMessage], operator.add]
@@ -110,7 +111,7 @@ class ConverseState(TypedDict, total=False):
 
 # ── T2: Scenario-Director node ────────────────────────────────────────────────
 def scenario_director(state: ConverseState):  # noqa: ANN001
-    """### TODO: Scenario-Director node   [track: C-project]  [status: todo]
+    """### TODO: Scenario-Director node   [track: C-project]  [status: done]
     - What:  a node that picks the next curveball for this turn and returns
              `{"director_note": <str or None>}`.
     - Why:   your FIRST node — learn the node contract: receive `state`, return a partial
@@ -133,7 +134,7 @@ def scenario_director(state: ConverseState):  # noqa: ANN001
 
 # ── T3: Mode router ───────────────────────────────────────────────────────────
 def route_mode(state):  # noqa: ANN001
-    """### TODO: route_mode (conditional edge)   [track: C-project]  [status: todo]
+    """### TODO: route_mode (conditional edge)   [track: C-project]  [status: done]
     - What:  a function `(state) -> "chat" | "score"` that decides which path START takes.
     - Why:   this is how LangGraph branches. `add_conditional_edges` (T4) calls it and maps
              its return value to a node.
@@ -150,7 +151,7 @@ def build_graph(chat_port: ModelPort, judge_port: ModelPort):
     they close over `chat_port` / `judge_port` (nodes take only `state`, so a closure is the
     simplest way to hand them a model).
 
-    ### TODO: T4 — build & compile the graph   [track: C-project]  [status: todo]
+    ### TODO: T4 — build & compile the graph   [track: C-project]  [status: done]
     - How:   1. read Quickstart + Graph API → "Build the graph".
              2. `builder = StateGraph(ConverseState)`
              3. add three nodes: "scenario_director", "role_player" (T5), "evaluator" (T6).
@@ -196,6 +197,7 @@ def build_graph(chat_port: ModelPort, judge_port: ModelPort):
     - Accept: schema-valid `Scorecard` on a sample transcript, each criterion carrying a real
               quote; reruns stable (±1).
     """
+
     async def role_player(state: ConverseState) -> dict:
         # build system prompt
         # send the messages with system prompt to the LLM

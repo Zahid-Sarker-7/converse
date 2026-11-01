@@ -33,10 +33,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
     if port is None:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Provider '{provider_name}' is not configured. "
-                f"Available: {list(registry)}"
-            ),
+            detail=(f"Provider '{provider_name}' is not configured. Available: {list(registry)}"),
         )
 
     async def event_stream():

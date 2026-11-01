@@ -77,9 +77,7 @@ async def turn(body: TurnRequest, request: Request) -> TurnResponse:
         port, {"scenario": body.scenario, "messages": body.messages, "mode": "chat"}
     )
     messages: list[ChatMessage] = result["messages"]
-    reply = next(
-        (m.content for m in reversed(messages) if m.role == Role.assistant), ""
-    )
+    reply = next((m.content for m in reversed(messages) if m.role == Role.assistant), "")
     turn_count = sum(1 for m in messages if m.role == Role.assistant)
     return TurnResponse(
         reply=reply, director_note=result.get("director_note"), turn_count=turn_count

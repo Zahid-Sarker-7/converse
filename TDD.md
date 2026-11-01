@@ -11,7 +11,7 @@
 |:--:|-------|--------|
 | 0 | Foundations (FastAPI + Next.js + Model port) | ✅ **Done** |
 | 1 | Multi-agent text core (LangGraph) | ✅ **Done** |
-| 2 | Voice (STT→LLM→TTS, barge-in) | 🟡 **Scaffolded** (3 hands-on TODOs pending) |
+| 2 | Voice (STT→LLM→TTS, barge-in) | ✅ **Hand-built done** (Pipecat migration planned, see STATE 2026-11-01) |
 | 3 | Vision (optional) | ⬜ Planned |
 | 4 | Evals & CI | ⬜ Planned |
 | 5 | Memory & personalization | ⬜ Planned |
@@ -181,9 +181,11 @@ LangGraph loop **unchanged**: `turn-detect → STT → graph(mode=chat) → sent
 | WS route `/session` + `/providers`; config/`.env`/`requirements-voice.txt`/`make voice` | ✅ | `api/voice.py`, `config.py` |
 | Pipeline orchestration (STT→graph→sentence-chunk TTS, out-queue) | ✅ | `app/voice/pipeline.py` |
 | Frontend voice client (mic→16k PCM16→WS→24k playback) | ✅ scaffold | `frontend/lib/voice.ts` *(not tsc-verified yet)* |
-| **TODO #1** Turn detection — Silero VAD + Smart-Turn v3 (replace energy/timer fallback) | 🔧 TODO | `app/voice/turn.py` |
-| **TODO #2** Barge-in — stop TTS <60ms + drain queue + 200ms guard | 🔧 TODO | `app/voice/pipeline.py::_barge_in` |
-| **TODO #3** Delivery metrics — WPM/fillers/talk-ratio/longest-pause from word timestamps | 🔧 TODO | `app/voice/metrics.py` |
+| **TODO #1** Turn detection — Silero VAD + Smart-Turn v3.2-cpu, both raw ONNX via onnxruntime (no torch); 512-sample chunk buffering, Smart-Turn on the whole turn after 200ms silence, 3s max-silence fallback | ✅ (AI-implemented on request, 2026-10-24) | `app/voice/turn.py` |
+| **TODO #2** Barge-in — `speech_ms`≥200ms guard, cancel + drop queued audio + client `interrupt` flush; blips ignored | ✅ (AI, 2026-11-01) | `app/voice/pipeline.py::_barge_in` |
+| E2E client (scripted mic over the real WS) | ✅ | `backend/scripts/voice_client.py` |
+| **TODO #3** Delivery metrics — WPM/fillers (punctuation-normalized, two-word phrases)/talk-ratio/longest in-turn pause | ✅ (Zahid, 2026-11-01) | `app/voice/metrics.py` |
+| Hardening — WS Origin check, handshake validation, sentinel-flushed metrics, 60s turn cap, Kokoro off-loop, PII at DEBUG | ✅ | `api/voice.py`, `voice/*` · `tests/test_voice_ws.py` |
 | Tests (`tests/test_voice.py`) — skip-gated acceptance, 2 live + 3 TODO-gated | ✅ | 8 pass / 3 skip |
 
 v0 browser Web Speech (serverless) is noted as an even-cheaper FE fallback; the server

@@ -26,9 +26,7 @@ class EchoAdapter(ModelPort):
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> AsyncIterator[StreamChunk]:
-        last_user = next(
-            (m.content for m in reversed(messages) if m.role == Role.user), ""
-        )
+        last_user = next((m.content for m in reversed(messages) if m.role == Role.user), "")
         reply = f"echo> {last_user}" if last_user else "echo> (say something)"
         for token in reply.split(" "):
             await asyncio.sleep(0.03)  # simulate token-by-token latency

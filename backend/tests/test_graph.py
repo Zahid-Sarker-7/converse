@@ -37,8 +37,7 @@ def test_director_picks_curveball_by_turn():
     # Past the end of the list → no note (don't crash).
     many = [ChatMessage(role=Role.assistant, content="x")] * 99
     assert (
-        scenario_director({"scenario": SAMPLE_SCENARIO, "messages": many})["director_note"]
-        is None
+        scenario_director({"scenario": SAMPLE_SCENARIO, "messages": many})["director_note"] is None
     )
 
 

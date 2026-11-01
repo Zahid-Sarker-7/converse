@@ -34,6 +34,7 @@ class DeliveryMetrics(BaseModel):
 #   {"type":"transcript", "role":"user|assistant", "text":"..."}
 #   {"type":"metrics", "metrics": {...DeliveryMetrics...}}
 #   {"type":"error", "message":"..."}
+#   {"type":"interrupt"}                              barge-in: client must flush queued playback
 # Binary WS frames = raw PCM16 @ 24 kHz TTS audio to play.
 
 
