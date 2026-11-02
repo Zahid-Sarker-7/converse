@@ -21,7 +21,5 @@ async def health(request: Request) -> dict:
         "version": settings.version,
         "environment": settings.environment,
         "default_provider": settings.default_provider,
-        "providers": [
-            {"name": name, "ready": port.ready} for name, port in registry.items()
-        ],
+        "providers": [{"name": name, "ready": port.ready} for name, port in registry.items()],
     }

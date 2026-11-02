@@ -22,7 +22,7 @@ const MIC_RATE = 16_000; // what the backend STT/VAD expect
 const TTS_RATE = 24_000; // what Kokoro / the backend sends down
 
 export interface VoiceEvent {
-  type: "state" | "transcript" | "partial_transcript" | "metrics" | "error";
+  type: "state" | "transcript" | "partial_transcript" | "metrics" | "error" | "interrupt";
   state?: "listening" | "thinking" | "speaking";
   role?: "user" | "assistant";
   text?: string;
@@ -65,6 +65,7 @@ export class VoiceSession {
   private stream?: MediaStream;
   private node?: ScriptProcessorNode;
   private playhead = 0; // scheduled-audio cursor for gap-free playback
+  private scheduled = new Set<AudioBufferSourceNode>(); // queued speech, so barge-in can stop it
 
   constructor(private cfg: VoiceSessionConfig) {}
 
@@ -74,7 +75,9 @@ export class VoiceSession {
 
     this.ws.onmessage = (ev) => {
       if (typeof ev.data === "string") {
-        this.cfg.onEvent(JSON.parse(ev.data) as VoiceEvent);
+        const e = JSON.parse(ev.data) as VoiceEvent;
+        if (e.type === "interrupt") this.flushPlayback(); // barge-in: silence already-sent audio
+        this.cfg.onEvent(e);
       } else {
         this.playPcm(new Int16Array(ev.data as ArrayBuffer));
       }
@@ -123,6 +126,15 @@ export class VoiceSession {
     this.playhead = Math.max(this.playhead, now);
     node.start(this.playhead);
     this.playhead += buf.duration;
+    this.scheduled.add(node);
+    node.onended = () => this.scheduled.delete(node);
+  }
+
+  /** Stop everything queued for playback (the server already dropped what it hadn't sent). */
+  private flushPlayback(): void {
+    this.scheduled.forEach((n) => n.stop());
+    this.scheduled.clear();
+    this.playhead = this.ctx?.currentTime ?? 0;
   }
 
   /** End the turn/session cleanly (-> backend computes delivery metrics). */

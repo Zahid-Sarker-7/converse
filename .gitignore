@@ -1,6 +1,7 @@
 # Python
 backend/.venv/
 backend/.env
+backend/models/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -11,6 +12,7 @@ frontend/node_modules/
 frontend/.next/
 frontend/.env.local
 next-env.d.ts
+*.tsbuildinfo
 
 # misc
 .DS_Store

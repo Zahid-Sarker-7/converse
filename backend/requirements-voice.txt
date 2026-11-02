@@ -4,12 +4,13 @@
 # STT (Groq Whisper) reuses the `groq` package from requirements-providers.txt — no extra dep.
 # The echo STT/TTS adapters need NONE of the below; they run the pipeline at $0.
 
-# TTS — Kokoro (Apache-2.0, local, 24kHz). First run downloads model weights.
-kokoro>=0.9
-numpy>=1.26            # Kokoro adapter converts float32 audio -> PCM16
+# TTS — Kokoro (Apache-2.0, local, 24kHz) is OPTIONAL and not installed here: it pulls torch +
+# spacy, and spacy doesn't build on Python 3.14 (verified 2026-11-01). To use it, run a 3.12/3.13
+# venv and `pip install kokoro`; KokoroTTS auto-registers when the package is importable.
 
 # Turn detection (TODO #1) — Silero VAD (MIT) + Smart-Turn v3 (BSD-2).
-silero-vad>=5.1
-onnxruntime>=1.19      # run Smart-Turn v3 torch-free on CPU
-# smart-turn weights: see https://github.com/pipecat-ai/smart-turn (bundled with pipecat, or
-# grab the ONNX export). Keep it CPU/torch-free to stay light.
+# NOT the `silero-vad` pip package — it hard-requires torch (~700MB) just to wrap a 2.3MB ONNX
+# file. We run the ONNX directly; `make voice` downloads it to backend/models/silero_vad.onnx.
+onnxruntime>=1.19      # runs Silero VAD + Smart-Turn v3 torch-free on CPU
+# Smart-Turn's Whisper features: vendored numpy code (app/voice/whisper_features.py), no transformers.
+# Smart-Turn v3.2-cpu weights (int8, ~8MB) come from HF pipecat-ai/smart-turn-v3 via `make voice`.

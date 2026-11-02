@@ -17,6 +17,9 @@ Wire protocol:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import re
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
@@ -26,6 +29,7 @@ from ..voice.pipeline import VoicePipeline
 from ..voice.schemas import VoiceEvent
 
 router = APIRouter(prefix="/voice")
+_LOCALHOST = r"http://(localhost|127\.0\.0\.1):\d+"  # same rule as the CORS middleware
 log = get_logger("voice")
 
 
@@ -39,38 +43,69 @@ async def providers(request: Request) -> dict:
     }
 
 
+class _HandshakeError(ValueError):
+    pass
+
+
 def _resolve(registry: dict, name: str | None, default: str):
-    return registry.get(name or default) or registry[default]
+    port = registry.get(name or default)
+    if port is None:
+        raise _HandshakeError(f"'{name}' is not configured. Available: {list(registry)}")
+    return port
+
+
+def _origin_allowed(ws: WebSocket, settings) -> bool:
+    """CORS doesn't apply to WebSockets: without this, any site could open a session from a
+    visitor's browser and spend our provider quota (cross-site WebSocket hijacking). Non-browser
+    clients send no Origin and are allowed (they can't ride a victim's browser)."""
+    origin = ws.headers.get("origin")
+    if origin is None or origin in settings.cors_origins:
+        return True
+    return settings.cors_allow_localhost and bool(re.fullmatch(_LOCALHOST, origin))
 
 
 @router.websocket("/session")
 async def session(ws: WebSocket) -> None:
-    await ws.accept()
     app = ws.app
     settings = app.state.settings
+    if not _origin_allowed(ws, settings):
+        await ws.close(code=1008)  # policy violation
+        return
+    await ws.accept()
 
     # 1. Handshake: the first text frame configures the session.
     try:
         cfg = await ws.receive_json()
-    except Exception:  # noqa: BLE001
-        await ws.close(code=1003)
+        if not isinstance(cfg, dict):
+            raise _HandshakeError("config must be a JSON object")
+        scenario = (
+            ScenarioConfig.model_validate(cfg["scenario"])
+            if cfg.get("scenario")
+            else SAMPLE_SCENARIO
+        )
+        chat_port = _resolve(app.state.registry, cfg.get("provider"), settings.default_provider)
+        stt = _resolve(app.state.stt_registry, cfg.get("stt"), settings.voice_stt_provider)
+        tts = _resolve(app.state.tts_registry, cfg.get("tts"), settings.voice_tts_provider)
+    except WebSocketDisconnect:
         return
-
-    scenario = (
-        ScenarioConfig.model_validate(cfg["scenario"]) if cfg.get("scenario") else SAMPLE_SCENARIO
-    )
-    chat_port = _resolve(app.state.registry, cfg.get("provider"), settings.default_provider)
-    stt = _resolve(app.state.stt_registry, cfg.get("stt"), settings.voice_stt_provider)
-    tts = _resolve(app.state.tts_registry, cfg.get("tts"), settings.voice_tts_provider)
+    except (ValueError, KeyError) as exc:  # bad JSON, invalid scenario, unknown provider
+        await ws.send_text(
+            VoiceEvent(type="error", message=f"bad handshake: {exc}").model_dump_json()
+        )
+        await ws.close(code=1008)
+        return
 
     pipeline = VoicePipeline(
         scenario=scenario, chat_port=chat_port, stt=stt, tts=tts, tts_voice=settings.kokoro_voice
     )
 
-    # 2. Pump: continuously flush the pipeline's out-queue to the socket.
+    # 2. Pump: the ONLY writer to the socket. A ("close", None) item ends it after everything
+    #    queued before it (e.g. the final metrics) has been sent.
     async def pump() -> None:
         while True:
             kind, payload = await pipeline.out.get()
+            if kind == "close":
+                return
             if kind == "audio":
                 await ws.send_bytes(payload)  # type: ignore[arg-type]
             else:  # "event"
@@ -87,13 +122,11 @@ async def session(ws: WebSocket) -> None:
                 break
             if (data := msg.get("bytes")) is not None:
                 await pipeline.on_audio_frame(data)
-            elif (text := msg.get("text")) is not None:
-                import json
-
-                if json.loads(text).get("type") == "end":
-                    await pipeline.finish()
-                    await asyncio.sleep(0.1)  # let the metrics event flush
-                    break
+            elif (text := msg.get("text")) is not None and _is_end(text):
+                await pipeline.finish()
+                await pipeline.out.put(("close", None))
+                await asyncio.wait_for(pump_task, timeout=5)  # metrics delivered, then close
+                break
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
@@ -102,7 +135,14 @@ async def session(ws: WebSocket) -> None:
         pump_task.cancel()
         if pipeline._respond_task:
             pipeline._respond_task.cancel()
-        try:
+        with contextlib.suppress(Exception):
             await ws.close()
-        except Exception:  # noqa: BLE001
-            pass
+
+
+def _is_end(text: str) -> bool:
+    """Control frames are JSON; anything malformed is ignored rather than ending the session."""
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(msg, dict) and msg.get("type") == "end"

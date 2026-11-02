@@ -1,40 +1,69 @@
-"""Turn detection — HANDS-ON TODO #1 (the first of your three Phase-2 learning pieces).
+"""Turn detection — two models answer two different questions:
 
-Turn detection answers two different questions with two different tools:
-    stage 1  Silero VAD        "is anyone speaking right now?"   (fast, acoustic)
-    stage 2  Smart-Turn v3     "did they actually FINISH?"        (semantic, after a pause)
-A VAD-only system cuts people off: "I need to think about that for a moment…" <pause> gets
-treated as end-of-turn. The stage-2 model is what makes the agent wait through that pause.
+    stage 1  Silero VAD     "is this 32ms chunk speech?"        every chunk, ~1ms
+    stage 2  Smart-Turn v3  "is the turn a complete thought?"  once silence starts, ~15ms
 
-This file ships a crude ENERGY+SILENCE-TIMER fallback so the pipeline runs today on echo.
-Your job is to replace `_fallback_is_speech` + the end-of-turn decision with the real models.
+VAD alone cuts people off: "Let me think about that…" <1s pause> looks exactly like the end of a
+turn to an acoustic model. Smart-Turn hears that the phrase is unfinished and we keep waiting.
 
-WHAT THE PIPELINE EXPECTS FROM YOU (the contract — don't change it):
-  - `feed(frame_pcm16: bytes) -> TurnEvent | None`  called for each ~20-30ms mic frame.
-       returns  TurnEvent("speech_started")  on the first speech frame of an utterance,
-                TurnEvent("speech_ended")    when the turn is complete (this triggers STT),
-                None                          otherwise.
-  - `is_speaking` property — True while the user is mid-utterance (barge-in reads this).
-  - `reset()` — clear buffers between utterances.
+Both run torch-free via onnxruntime. Models live in backend/models/ (`make voice` fetches them).
+
+    chunk ─► Silero p(speech) ≥ vad_threshold?
+       yes ─► in a turn already? no → emit speech_started.  Reset silence clock.
+       no  ─► (only while in a turn) silence clock += 32ms
+                 ≥ check_after_ms, not yet checked this pause → Smart-Turn(whole turn)
+                       p(complete) ≥ turn_threshold → emit speech_ended
+                 ≥ max_silence_ms → emit speech_ended   (fallback: never wait forever)
+
+The contract the pipeline relies on: `feed(frame) -> TurnEvent | None`, `is_speaking`,
+`utterance_audio`, `reset()`.
 """
 
 from __future__ import annotations
 
-from array import array  # stdlib — PCM16 RMS without numpy (audioop was removed in 3.13)
 from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
+
+import numpy as np
 
 from ..core.voice_port import STT_SAMPLE_RATE
+from .whisper_features import compute_whisper_log_mel_features
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models"  # backend/models
+SILERO_PATH = MODELS_DIR / "silero_vad.onnx"
+SMART_TURN_PATH = MODELS_DIR / "smart-turn-v3.2-cpu.onnx"
+
+CHUNK_SAMPLES = 512  # Silero's fixed input at 16kHz (= 32ms)
+CHUNK_BYTES = CHUNK_SAMPLES * 2  # PCM16
+CHUNK_MS = CHUNK_SAMPLES / STT_SAMPLE_RATE * 1000
+SILERO_CONTEXT = 64  # samples of the previous chunk Silero wants prepended
+TURN_WINDOW = 8 * STT_SAMPLE_RATE  # Smart-Turn looks at the last 8s of the turn
+
+# Silero's RNN state drifts during long non-speech and then under-reports the next speech
+# (Pipecat's finding). Reset it after ~2s of audio, but only at a run of clearly-silent chunks so
+# we never reset mid-word.
+VAD_RESET_EVERY_MS = 2000
+VAD_RESET_QUIET_PROB = 0.1
+VAD_RESET_QUIET_CHUNKS = 5  # ~160ms of p < 0.1
 
 
-def _rms_pcm16(frame: bytes) -> float:
-    """Root-mean-square amplitude of signed 16-bit little-endian PCM, stdlib only."""
-    if len(frame) < 2:
-        return 0.0
-    samples = array("h")  # signed short
-    samples.frombytes(frame[: len(frame) - (len(frame) % 2)])
-    if not samples:
-        return 0.0
-    return (sum(s * s for s in samples) / len(samples)) ** 0.5
+@cache
+def _silero():
+    import onnxruntime as ort  # lazy: only needed once a voice session runs
+
+    return ort.InferenceSession(str(SILERO_PATH))
+
+
+@cache
+def _smart_turn():
+    import onnxruntime as ort
+
+    return ort.InferenceSession(str(SMART_TURN_PATH))
+
+
+def _to_float(pcm16: bytes) -> np.ndarray:
+    return np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
 
 
 @dataclass
@@ -43,81 +72,120 @@ class TurnEvent:
 
 
 class TurnDetector:
-    """Streaming turn detector. Feed it mic frames; it tells you when a turn starts/ends."""
+    """Streaming turn detector. Feed it mic frames of any size; it emits turn start/end."""
 
     def __init__(
         self,
-        sample_rate: int = STT_SAMPLE_RATE,
-        silence_ms: int = 700,
-        energy_threshold: int = 500,
+        vad_threshold: float = 0.5,
+        turn_threshold: float = 0.5,
+        check_after_ms: int = 200,  # silence before asking Smart-Turn
+        max_silence_ms: int = 3000,  # give up waiting even if Smart-Turn says "incomplete"
+        max_turn_ms: int = 60_000,  # hard cap: steady noise must not grow a turn forever
     ) -> None:
-        self.sample_rate = sample_rate
-        self.silence_ms = silence_ms
-        self.energy_threshold = energy_threshold
+        # Calibration knobs: tune per scenario (a language learner pauses longer than a sales rep).
+        self.vad_threshold = vad_threshold
+        self.turn_threshold = turn_threshold
+        self.check_after_ms = check_after_ms
+        self.max_silence_ms = max_silence_ms
+        self.max_turn_ms = max_turn_ms
         self.reset()
 
     def reset(self) -> None:
-        self._in_speech = False
-        self._silence_run_ms = 0
-        self._utterance = bytearray()  # accumulates the current turn's audio for STT
+        self._buf = bytearray()  # frame bytes not yet consumed as a whole 512-sample chunk
+        self._reset_vad()
+        self._in_turn = False
+        self._silence_ms = 0.0
+        self._checked_this_pause = False
+        self._utterance = bytearray()  # the whole current turn, handed to STT
+        self._speech_ms = 0.0  # speech-only time in this turn (pauses excluded) — barge-in guard
 
     @property
     def is_speaking(self) -> bool:
-        return self._in_speech
+        return self._in_turn
+
+    @property
+    def speech_ms(self) -> float:
+        return self._speech_ms
 
     @property
     def utterance_audio(self) -> bytes:
         return bytes(self._utterance)
 
-    def _fallback_is_speech(self, frame: bytes) -> bool:
-        """Crude acoustic VAD: RMS energy over a threshold. REPLACE with Silero VAD."""
-        return _rms_pcm16(frame) >= self.energy_threshold
-
     def feed(self, frame: bytes) -> TurnEvent | None:
-        """### TODO: Turn detection (Silero VAD + Smart-Turn v3)  [track: C-project] [status: todo]
+        # Frames arrive in whatever size the client sends; Silero needs exactly 512 samples.
+        self._buf.extend(frame)
+        event = None
+        while len(self._buf) >= CHUNK_BYTES:
+            chunk = bytes(self._buf[:CHUNK_BYTES])
+            del self._buf[:CHUNK_BYTES]
+            # one frame (~43ms) holds 1-2 chunks, so at most one event per frame in
+            # practice; if two fire, the later one wins.
+            event = self._feed_chunk(chunk) or event
+            if (
+                self._in_turn
+                and len(self._utterance) / 2 / STT_SAMPLE_RATE * 1000 >= self.max_turn_ms
+            ):
+                event = self._end()
+        return event
 
-        - What:  replace the energy/timer heuristic below with a real two-stage detector:
-                 Silero VAD per frame (speech?), and when VAD goes quiet, ask Smart-Turn v3
-                 whether the utterance is semantically COMPLETE before emitting "speech_ended".
-                 Keep this exact `feed()` signature + the `is_speaking`/`utterance_audio` API.
-        - Why:   this is THE gate that shapes the whole conversation — get it wrong and the
-                 agent either interrupts the learner or sits there awkwardly. It's also the
-                 signal barge-in (TODO #2) depends on. Highest-leverage piece in Phase 2.
-        - How:   1. Silero: load once (`from silero_vad import load_silero_vad, VADIterator`
-                    or the ONNX build); run it on 16 kHz frames; threshold ~0.5-0.7.
-                 2. On the speech->silence edge, slice the last ≤8s of `_utterance`, feed it
-                    to Smart-Turn v3 (16 kHz mono PCM). If it says "complete" (or the silence
-                    exceeds a hard `stop_secs` fallback), emit TurnEvent("speech_ended").
-                 3. Emit TurnEvent("speech_started") on the first speech frame; keep
-                    appending frames to `self._utterance` while in speech (already wired).
-        - Working with: `TurnDetector` here · the pipeline in `voice/pipeline.py` (consumer) ·
-                 frame size is whatever the WS sends (~20-30ms); don't assume a fixed size.
-        - Docs & SDKs:
-                 Silero VAD   https://github.com/snakers4/silero-vad   (MIT, 1.8MB, ~1ms/frame)
-                 Smart-Turn   https://github.com/pipecat-ai/smart-turn (BSD-2, ~8M, ~65ms CPU)
-                 LiveKit turn https://docs.livekit.io/agents/logic/turns/turn-detector/
-                 concept      https://livekit.com/blog/turn-detection-voice-agents-vad-endpointing-model-based-detection
-        - Acceptance: `make test` → unskip test_turn_waits_through_a_thinking_pause in
-                 tests/test_voice.py and make it green: a 700ms gap mid-sentence must NOT end
-                 the turn, but a real end-of-thought must. Manually: say "let me think…" and it
-                 should wait.
-        """
-        frame_ms = (len(frame) / 2) / self.sample_rate * 1000  # 2 bytes/sample, mono
-        speech = self._fallback_is_speech(frame)
-
-        if speech:
-            self._silence_run_ms = 0
-            self._utterance.extend(frame)
-            if not self._in_speech:
-                self._in_speech = True
+    def _feed_chunk(self, chunk: bytes) -> TurnEvent | None:
+        if self._speech_prob(chunk) >= self.vad_threshold:
+            self._silence_ms = 0.0
+            self._checked_this_pause = False  # speech resumed → re-check at the next pause
+            self._speech_ms += CHUNK_MS
+            self._utterance.extend(chunk)
+            if not self._in_turn:
+                self._in_turn = True
                 return TurnEvent("speech_started")
             return None
 
-        # silence frame
-        if self._in_speech:
-            self._utterance.extend(frame)  # keep trailing silence in the clip for STT context
-            self._silence_run_ms += frame_ms
-            if self._silence_run_ms >= self.silence_ms:
-                self._in_speech = False
-                return TurnEvent("speech_ended")
+        if not self._in_turn:
+            return None  # silence between turns: ignore
+
+        self._utterance.extend(chunk)  # keep in-turn pauses so STT/metrics see real timing
+        self._silence_ms += CHUNK_MS
+        if self._silence_ms >= self.max_silence_ms:
+            return self._end()
+        if self._silence_ms >= self.check_after_ms and not self._checked_this_pause:
+            self._checked_this_pause = True
+            if self._turn_complete_prob() >= self.turn_threshold:
+                return self._end()
         return None
+
+    def _end(self) -> TurnEvent:
+        self._in_turn = False
+        return TurnEvent("speech_ended")
+
+    def _reset_vad(self) -> None:
+        self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)  # Silero RNN memory
+        self._vad_context = np.zeros((1, SILERO_CONTEXT), dtype=np.float32)
+        self._since_vad_reset_ms = 0.0
+        self._quiet_chunks = 0
+
+    def _maybe_reset_vad(self, prob: float) -> None:
+        self._since_vad_reset_ms += CHUNK_MS
+        self._quiet_chunks = self._quiet_chunks + 1 if prob < VAD_RESET_QUIET_PROB else 0
+        if (
+            self._since_vad_reset_ms >= VAD_RESET_EVERY_MS
+            and self._quiet_chunks >= VAD_RESET_QUIET_CHUNKS
+        ):
+            self._reset_vad()
+
+    def _speech_prob(self, chunk: bytes) -> float:
+        """Silero: prepend the previous chunk's tail, carry the RNN state forward."""
+        x = np.concatenate([self._vad_context, _to_float(chunk)[None, :]], axis=1)
+        out, self._vad_state = _silero().run(
+            None,
+            {"input": x, "state": self._vad_state, "sr": np.array(STT_SAMPLE_RATE, np.int64)},
+        )
+        self._vad_context = x[:, -SILERO_CONTEXT:]
+        prob = float(out[0][0])
+        self._maybe_reset_vad(prob)
+        return prob
+
+    def _turn_complete_prob(self) -> float:
+        """Smart-Turn on the last 8s of the turn, zero-padded at the FRONT (speech at the end)."""
+        audio = _to_float(bytes(self._utterance))[-TURN_WINDOW:]
+        audio = np.pad(audio, (TURN_WINDOW - len(audio), 0))
+        feats = compute_whisper_log_mel_features(audio)[None, :, :]  # (1, 80 mel bins, 800 frames)
+        return float(_smart_turn().run(None, {"input_features": feats})[0][0].item())
