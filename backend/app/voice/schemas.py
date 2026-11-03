@@ -21,8 +21,9 @@ class DeliveryMetrics(BaseModel):
     filler_count: int = Field(0, description="um/uh/like/you-know/… occurrences")
     fillers_per_min: float = 0.0
     talk_ratio: float = Field(
-        0.0, description="learner speaking time / total conversation time (0..1)"
+        0.0, description="learner speaking time / (learner + agent speaking time), 0..1"
     )
+    spoken_turns: int = Field(0, description="voice turns measured (typed turns have no timing)")
     longest_pause_s: float = Field(0.0, description="longest within-turn silence, seconds")
     speaking_time_s: float = 0.0
 

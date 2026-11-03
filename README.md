@@ -1,142 +1,247 @@
 # Converse
 
-The reusable AI engine behind the milestone project — **one engine, many products**. Every
-capability (model routing, orchestration, later voice/vision/memory) sits behind a **port**
-so providers and features swap by config, not by code. v1 product: a role-play trainer /
-spoken-English + interview coach — converse with an AI persona, then get an LLM-judged
-rubric scorecard.
+**Rehearse the hard conversation before it happens.** Talk (or type) to an in-character AI —
+an interviewer, a tough customer, an examiner — then get a rubric scorecard with **verbatim
+quotes as evidence** and delivery metrics on *how* you spoke.
 
-> **Design & phase plan:** see [`TDD.md`](TDD.md) (architecture, decisions, status).
-> Full product/feature spec: `../ventures/11-milestone-project.md` and `../ventures/roadmap/`.
+It's built as **one engine, many products**: every capability sits behind a swappable *port*,
+and a product is just a "pack" (persona + rubric + scenario). v1 pack: a spoken-English and
+interview coach.
 
-## Architecture
+![Voice role-play session](docs/screenshots/02-voice-session.jpg)
 
-```
-                    Next.js frontend (:3000)
-              provider selector · streaming chat · health badge
-                              │  POST /api/chat (SSE)  ·  GET /health  ·  /api/roleplay/*
- ┌────────────────────────────▼─────────────────────────────────────┐
- │ FastAPI backend (:8000)                                           │
- │   config (pydantic-settings)   ·   structlog   ·   /health        │
- │                                                                   │
- │   ModelPort (ABC)  ── stream_chat() · structured_output()        │
- │     ├─ EchoAdapter    reference impl (runs at $0, no keys)        │
- │     ├─ GroqAdapter    default free provider                      │
- │     └─ GeminiAdapter  second free provider                       │
- │                                                                   │
- │   Orchestrator (LangGraph)  ── graph of agent nodes / shared state│
- │     Scenario-Director · Role-Player · Evaluator (LLM-judge)      │
- └───────────────────────────────────────────────────────────────────┘
-```
+| | |
+|---|---|
+| 🎙️ **Voice or text, one conversation** | Type, then talk, then type again — the AI keeps the whole thread. Interrupt it mid-sentence; it stops. |
+| 🧑‍⚖️ **Scored with evidence** | An LLM judge grades each rubric criterion 1–5 and quotes the exact line it based the score on. |
+| 📈 **Delivery metrics** | Pace, fillers per minute, talk:listen ratio, longest pause — measured from your actual audio. |
+| 💸 **$0 to run** | Free tiers (Groq, Gemini) + local models. No paid keys, no GPU. |
 
-**Why a port/adapter?** Everything in the engine talks to `ModelPort`, never to a vendor
-SDK — swapping Groq ↔ Gemini ↔ (later) Claude is a dropdown / env change. LangGraph nodes
-are plain `(state) -> dict` functions, so the same adapters plug straight into the agent
-graph with no extra wrapper deps. See `backend/app/core/model_port.py`.
+---
 
 ## Quickstart
 
+**Needs:** Python 3.12+, Node 20+, and a free [Groq API key](https://console.groq.com/keys) (no card).
+
 ```bash
 cd converse
-make setup        # venv + backend deps + npm install (+ seeds .env / .env.local)
-make dev          # backend on :8000, frontend on :3000
+make setup               # backend venv + deps, frontend npm install, seeds backend/.env
+make providers voice     # provider SDKs + voice models (~130 MB: Silero, Smart-Turn, Kokoro)
+# add your key:  GROQ_API_KEY=...  in backend/.env   (optional: GOOGLE_API_KEY for Gemini)
+make dev                 # backend → http://localhost:8000 · frontend → http://localhost:3000
 ```
 
-Open <http://localhost:3000>, keep the provider on **echo**, and send a message — it streams
-back token-by-token with no keys and no network.
+Then open <http://localhost:3000> → **Role-play** → type a greeting or click **Talk** (allow the
+mic, **use headphones**) → answer the interviewer → **End** → **Score me**.
 
-**Use a real provider:** `make providers` (installs the SDKs) → add `GROQ_API_KEY` and/or
-`GOOGLE_API_KEY` to `backend/.env` → set `DEFAULT_PROVIDER=groq` (or pick from the UI
-dropdown). Groq's free tier needs no card; Gemini's free tier covers Flash models.
+> No key yet? Everything still runs on the built-in **echo** providers (canned replies, silent
+> audio) — useful to see the flow end to end.
 
-Other targets: `make backend`, `make frontend`, `make stop`, `make health`, `make test`,
-`make lint`, `make fmt`. Run `make help` for the list.
+| Command | What it does |
+|---|---|
+| `make dev` | backend + frontend with hot reload |
+| `make test` · `make lint` | backend tests (33) · ruff |
+| `make stop` | free stuck ports (:8000, :3000, :3001) |
+| `make health` | provider readiness |
+| `make help` | everything else |
 
-> `uv` works too: `cd backend && uv venv && uv pip install -r requirements-dev.txt`.
+---
 
-### Voice (Phase 2)
+## Architecture at a glance
 
-Speak to the persona over a WebSocket: turn detection (Silero VAD + Smart-Turn v3, local ONNX)
-→ STT (Groq Whisper) → the same LangGraph loop → TTS, with barge-in and delivery metrics.
+```mermaid
+flowchart LR
+    UI["Next.js UI<br/>Role-play studio · Scorecard"]
 
-```bash
-make providers voice     # Groq SDK + onnxruntime; downloads the two turn-detection models
-make backend             # terminal 1 — watch the per-step logs
-cd backend               # terminal 2 — a scripted "mic" over the real WebSocket:
-say -o /tmp/me.wav --data-format=LEI16@16000 "Um, so I led the migration. [[slnc 1500]] It was hard."
-.venv/bin/python scripts/voice_client.py /tmp/me.wav --stt groq   # prints events + metrics
+    subgraph API["FastAPI backend"]
+        direction TB
+        R["/api/roleplay/turn · score<br/>(HTTP, text)"]
+        V["/api/voice/session<br/>(WebSocket, audio)"]
+        G["LangGraph orchestrator<br/>Director → Role-Player · Evaluator"]
+        VP["Voice pipeline<br/>turn detection · barge-in · metrics"]
+    end
+
+    subgraph PORTS["Ports → swappable adapters"]
+        direction TB
+        M["ModelPort<br/>Groq · Gemini · echo"]
+        S["STTPort<br/>Groq Whisper · echo"]
+        T["TTSPort<br/>Kokoro · echo"]
+    end
+
+    UI -- text --> R --> G
+    UI -- mic / speech --> V --> VP --> G
+    G --> M
+    VP --> S
+    VP --> T
 ```
 
-Defaults are `VOICE_STT_PROVIDER=echo` / `VOICE_TTS_PROVIDER=echo` ($0, no keys, silent audio).
-Real speech out needs Kokoro: `pip install kokoro` in a Python 3.12/3.13 venv (its spacy
-dependency doesn't build on 3.14); it auto-registers as `--tts kokoro`.
-Browser origins must be in `CORS_ORIGINS` (the WebSocket checks `Origin`; CORS alone doesn't).
+- **The orchestrator never knows which vendor it's talking to** — only the port. Swapping Groq
+  for Gemini, or Kokoro for ElevenLabs, is an adapter + config change, not a rewrite.
+- **Voice is just another transport** in front of the same LangGraph brain: the text and voice
+  paths share one conversation and one judge.
+- **Text turn:** Scenario-Director picks a curveball → Role-Player replies in character.
+  **Score:** the Evaluator returns a schema-valid `Scorecard` (score + quote + rationale per criterion).
 
-## Endpoints
+📖 Deeper reading: [**ARCHITECTURE.md**](ARCHITECTURE.md) (why each layer exists, options &
+trade-offs, workflow vs agent) · [**TDD.md**](TDD.md) (decisions, per-phase status, test strategy).
+
+---
+
+## Voice architecture
+
+```mermaid
+flowchart LR
+    MIC["🎙️ Browser mic<br/>PCM16 · 16 kHz"] -- WebSocket --> TD
+
+    subgraph SERVER["Voice pipeline (server)"]
+        direction LR
+        TD["Turn detection<br/>Silero VAD + Smart-Turn v3"]
+        STT["STT<br/>Groq Whisper"]
+        LLM["Same LangGraph loop<br/>(+ chat history)"]
+        TTS["TTS<br/>Kokoro, per sentence"]
+        TD -- "turn ended" --> STT --> LLM --> TTS
+        TD -. "user talks over AI" .-> BI["Barge-in<br/>cancel + flush"]
+        STT -. "word timings" .-> MET["Delivery metrics"]
+    end
+
+    TTS -- "PCM16 · 24 kHz" --> SPK["🔊 Browser playback"]
+    BI -. interrupt .-> SPK
+```
+
+| Stage | Choice | Why |
+|---|---|---|
+| **Turn detection** | Silero VAD (*is this speech?*) + Smart-Turn v3 (*is the thought finished?*) | Waits through "let me think…" pauses instead of cutting you off. Local ONNX, ~1 ms + ~15 ms. |
+| **STT** | Groq `whisper-large-v3-turbo` | Free tier, word timestamps, prompted to keep fillers ("um/uh") and spell RAG/MCP/Pub/Sub. |
+| **LLM** | Groq `openai/gpt-oss-120b` (or Gemini) | Fast first token; replies kept to 1–3 spoken sentences in voice mode. |
+| **TTS** | Kokoro via `kokoro-onnx` (int8) | Apache-2.0, local, ~0.5 s to first audio, ~5× realtime on CPU. |
+| **Transport** | Our own WebSocket + ports | Full control and visibility. (LiveKit/Pipecat considered; Pipecat is the planned production migration.) |
+
+**What makes it feel like a conversation** — each learned from real sessions:
+
+| Behaviour | How |
+|---|---|
+| Doesn't interrupt your thinking pauses | Smart-Turn checks at 200 ms of silence, but the turn only ends after ≥500 ms; a transcript that *sounds* unfinished ("we had to…") holds 3 s more |
+| You can interrupt it | ≥200 ms of your speech while it talks → generation cancelled, queued audio dropped, browser playback flushed |
+| Never loses your opening words | 320 ms pre-roll buffer; if you resume mid-transcription, the first part is carried into the next turn |
+| Ignores noise and keyboard clicks | mic muted while typing · turns with <250 ms of speech dropped · Whisper's "Thank you." hallucination filtered |
+| Honest metrics | pauses measured by the VAD (Whisper hides silence inside word timings); talk:listen = your speech ÷ (yours + AI's) |
+
+All voice models run **locally via onnxruntime — no torch, no GPU**. Only STT and the LLM call Groq.
+
+---
+
+## Screenshots
+
+| Home | Delivery metrics |
+|---|---|
+| ![Home](docs/screenshots/01-home.jpg) | ![Delivery metrics](docs/screenshots/03-delivery-metrics.jpg) |
+| **Scorecard (quoted evidence)** | **API (OpenAPI docs at `:8000/docs`)** |
+| ![Scorecard](docs/screenshots/04-scorecard.jpg) | ![API docs](docs/screenshots/05-api-docs.jpg) |
+
+---
+
+## API
 
 | Method | Path | Purpose |
-|--------|------|---------|
+|---|---|---|
 | GET | `/health` | app + per-provider readiness |
 | POST | `/api/chat` | provider-agnostic streaming chat (SSE) |
-| GET | `/api/roleplay/sample` | a ready-to-use `ScenarioConfig` |
-| POST | `/api/roleplay/turn` | one learner turn → in-character persona reply |
-| POST | `/api/roleplay/score` | grade a transcript → rubric `Scorecard` |
-| WS | `/api/voice/session` | voice session: JSON config → PCM16@16k mic up; events + PCM16@24k speech down; `{"type":"end"}` → delivery metrics |
+| GET | `/api/roleplay/sample` | a ready-to-use scenario |
+| POST | `/api/roleplay/turn` | one learner turn → in-character reply |
+| POST | `/api/roleplay/score` | transcript → rubric `Scorecard` |
+| WS | `/api/voice/session` | voice session (protocol below) |
 | GET | `/api/voice/providers` | STT/TTS adapter readiness |
 
-Interactive API docs at <http://localhost:8000/docs>. Current implementation status per
-endpoint is tracked in [`TDD.md`](TDD.md) §4.
+<details>
+<summary><b>Voice WebSocket protocol</b></summary>
 
-## Hot-reload & debugging
+| Direction | Frame | Meaning |
+|---|---|---|
+| client → server | text `{scenario?, messages?, provider?, stt?, tts?}` | first frame: session config (+ prior chat history) |
+| client → server | binary | mic audio, PCM16 mono 16 kHz |
+| client → server | text `{"type":"text","text":…}` | a typed turn mid-session |
+| client → server | text `{"type":"end"}` | end → server sends delivery metrics, then closes |
+| server → client | text `{"type":"state"\|"transcript"\|"interrupt"\|"metrics"\|"error",…}` | events |
+| server → client | binary | agent speech, PCM16 mono 24 kHz |
 
-| | Command | Hot-reload | Breakpoints |
-|---|---|:--:|:--:|
-| Backend | `make backend` (uvicorn `--reload`) | ✅ | ✖ |
-| Frontend | `make frontend` (Next.js Fast Refresh) | ✅ | ✖ |
-| Backend debug | VS Code ▶ **Backend: FastAPI (debug)** | ✖ (no `--reload`) | ✅ |
-| Frontend (client) | VS Code ▶ **Frontend: Chrome (client)** | ✅ | ✅ |
-| Frontend (server) | VS Code ▶ **Frontend: Next.js server (debug)** | ✅ | ✅ |
+Browser origins must be listed in `CORS_ORIGINS` — the WebSocket checks `Origin` itself (CORS
+doesn't cover WebSockets).
+</details>
 
-The backend debug config drops `--reload` because uvicorn's reloader runs the server in a
-child process the debugger can't reliably attach to (breakpoints silently miss). Use
-`make backend` for reload; use the debug config for breakpoints. For client-side React
-breakpoints, run `make frontend` first, then the Chrome config (or the **Full stack**
-compound). **Open the `converse/` folder in VS Code** so `.vscode/` is picked up.
+---
 
-> Ports stuck (`Address already in use`, or Next.js jumping to :3001)? Run `make stop` to
-> free :8000/:3000/:3001, then `make dev` again.
+## Development
 
-## Layout
+<details>
+<summary><b>Test voice without a browser</b> (scripted mic over the real WebSocket)</summary>
+
+```bash
+cd backend
+say -o /tmp/me.wav --data-format=LEI16@16000 "Um, so I led the migration. [[slnc 1500]] It was hard."
+.venv/bin/python scripts/voice_client.py /tmp/me.wav --stt groq --tts kokoro
+afplay /tmp/agent.wav      # hear the reply
+```
+</details>
+
+<details>
+<summary><b>Debugging (VS Code)</b></summary>
+
+Open the **`converse/`** folder so `.vscode/` is picked up.
+
+| Config | Hot reload | Breakpoints |
+|---|:--:|:--:|
+| `make backend` / `make frontend` | ✅ | ✖ |
+| ▶ Backend: FastAPI (debug) | ✖ | ✅ |
+| ▶ Frontend: Chrome (client) · Next.js server | ✅ | ✅ |
+| ▶ Testing panel → **Debug Test** on any test | — | ✅ |
+
+The backend debug config drops `--reload` (the reloader's child process can't be attached).
+Each voice step logs one line (`turn_event reason=…`, `stt_done`, `llm_reply`, `barge_in`,
+`session_metrics`); learner text is only logged at `LOG_LEVEL=DEBUG`.
+</details>
+
+<details>
+<summary><b>Project layout</b></summary>
 
 ```
 converse/
-├── TDD.md                     technical design + phase status
+├── README.md · ARCHITECTURE.md · TDD.md
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            FastAPI app + lifespan (builds the provider registry)
-│   │   ├── config.py          pydantic-settings (providers, keys, defaults)
-│   │   ├── logging.py         structlog setup (pretty dev / JSON prod)
-│   │   ├── api/               health.py · chat.py (SSE) · agents.py (/api/roleplay)
+│   │   ├── main.py · config.py · logging.py
+│   │   ├── api/            health · chat (SSE) · agents (/roleplay) · voice (WebSocket)
+│   │   ├── agents/         LangGraph graph (Director, Role-Player, Evaluator) + schemas
 │   │   ├── core/
-│   │   │   ├── model_port.py  the ModelPort interface + message types
-│   │   │   └── providers/     echo (reference) · groq · gemini
-│   │   ├── agents/            LangGraph graph + agent nodes + domain schemas
-│   │   └── models/schemas.py  request/response models
-│   ├── tests/                 health/echo smoke + graph wiring tests
-│   ├── requirements*.txt      core / dev / providers
-│   └── .env.example
-├── frontend/                  Next.js (App Router) chat UI
-└── .vscode/                   debug + editor config
+│   │   │   ├── model_port.py · voice_port.py      the ports
+│   │   │   ├── providers/  echo · groq · gemini   (ModelPort adapters)
+│   │   │   └── voice/      echo · groq_whisper_stt · kokoro_tts   (STT/TTS adapters)
+│   │   └── voice/          pipeline · turn (VAD + Smart-Turn) · metrics · whisper_features
+│   ├── scripts/voice_client.py    scripted-mic E2E client
+│   ├── tests/              graph · health · voice pipeline · voice WebSocket
+│   └── models/             downloaded ONNX models (gitignored)
+├── frontend/               Next.js 15 · Tailwind v4 · motion
+│   ├── components/         Hero · RoleplayStudio · Scorecard · QuickChat · ui
+│   └── lib/                api.ts (HTTP) · voice.ts (mic, WebSocket, playback)
+└── docs/screenshots/
 ```
+</details>
 
-## Notes & constraints
+---
 
-- **$0 build.** Groq's free tier needs no card; Gemini's free tier covers Flash models (but
-  trains on your inputs and is unavailable in the EEA/UK — use non-sensitive test data). A
-  Claude adapter is deferred until a (paid) Anthropic key exists; the port already accepts it.
-- **Model IDs drift.** Verify current IDs against each provider's console before relying on
-  the defaults in `.env.example`.
-- **Structured output.** The LLM-judge uses Gemini's `response_schema` (reliable schema
-  enforcement); Groq's `gpt-oss-120b` can ignore schemas, so validate + retry if used there.
-- **Deploy (later phases).** Vercel for the Next.js frontend; the realtime/voice backend
-  needs a persistent host (Modal / Deno Deploy / small always-on box), not pure serverless.
+## Status
+
+| Phase | | |
+|---|:--:|---|
+| 0 · Foundations — FastAPI, Next.js, provider-swappable `ModelPort` | ✅ | |
+| 1 · Multi-agent text core — LangGraph + LLM-judge scorecard | ✅ | |
+| 2 · Voice — STT → LLM → TTS, turn detection, barge-in, delivery metrics | ✅ | migrating orchestration to Pipecat next |
+| 3–9 · Vision · Evals & CI · Memory · Guardrails · Observability · SaaS · `create-ai-app` | ⬜ | see [TDD.md](TDD.md) §5 |
+
+## Notes
+
+- **Free tiers drift.** Model IDs and limits change — verify against each provider's console
+  before relying on the defaults in `backend/.env.example`. Gemini's free tier trains on inputs
+  and isn't available in the EEA/UK; use non-sensitive data.
+- **Python 3.14:** the official `kokoro` package doesn't build (spacy); we use `kokoro-onnx`.
+- **Deploying:** the frontend fits Vercel; the voice WebSocket needs a persistent host
+  (Modal, Fly, a small VM) — not pure serverless.

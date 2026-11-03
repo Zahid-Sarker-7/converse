@@ -44,8 +44,8 @@ class Scorecard(BaseModel):
 
     criteria: list[CriterionScore]
     overall: int = Field(ge=1, le=5)
-    summary: str
-    focus_next: str  # the single thing to work on next retry
+    summary: str  # addressed to the learner ("you"), not about them
+    focus_next: str  # the single thing to work on next retry, as advice TO the learner
 
 
 # A ready-to-run sample so the loop is demoable from turn one (curl / tests / UI).

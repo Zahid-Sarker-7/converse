@@ -1,36 +1,49 @@
 """Kokoro TTS adapter — the default free, local text-to-speech.
 
-Kokoro is an 82M-param, Apache-2.0 model (cleanest commercial license among open TTS — the
-actively-maintained Piper fork is GPL-3.0) with 54 preset voices at 24 kHz. It runs on CPU;
-first-audio latency on CPU is ~1-3s, which we hide by having the *pipeline* feed us one
-SENTENCE at a time so the user hears the first sentence while the rest is still generating.
+Kokoro is an 82M-param, Apache-2.0 model (54 voices, 24 kHz). We run it through `kokoro-onnx`
+(onnxruntime, no torch/spacy — the official `kokoro` package can't install on Python 3.14) with
+the int8 weights `make voice` downloads to backend/models/. On CPU: ~0.5s to first audio, ~5x
+realtime. The pipeline feeds us one sentence at a time, so the user hears sentence 1 while the
+rest is still being generated.
 
-Install (only when you start the voice TODOs):  pip install -r requirements-voice.txt
-First run downloads the model weights (~file in HF cache).
-
-Docs: https://github.com/hexgrad/kokoro
+Docs: https://github.com/thewh1teagle/kokoro-onnx · voices: hexgrad/Kokoro-82M VOICES.md
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import numpy as np
 
 from ..voice_port import TTS_SAMPLE_RATE, AudioChunk, TTSPort
+
+MODELS_DIR = Path(__file__).resolve().parents[3] / "models"  # backend/models
+MODEL_PATH = MODELS_DIR / "kokoro-v1.0.int8.onnx"
+VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
+
+
+def available() -> bool:
+    import importlib.util
+
+    return (
+        importlib.util.find_spec("kokoro_onnx") is not None
+        and MODEL_PATH.exists()
+        and VOICES_PATH.exists()
+    )
 
 
 class KokoroTTS(TTSPort):
     name = "kokoro"
     ready = True
 
-    # Kokoro voice ids: first letter = language (a=American English), rest = voice name.
-    def __init__(self, default_voice: str = "af_heart", lang_code: str = "a") -> None:
-        from kokoro import KPipeline  # lazy import — heavy, optional
+    # Voice ids: first letter = language (a = American English), second = gender, then a name.
+    def __init__(self, default_voice: str = "af_heart") -> None:
+        from kokoro_onnx import Kokoro  # lazy: optional dep
 
         self.default_voice = default_voice
-        self._pipeline = KPipeline(lang_code=lang_code)
+        self._kokoro = Kokoro(str(MODEL_PATH), str(VOICES_PATH))
 
     async def synthesize(
         self,
@@ -38,12 +51,10 @@ class KokoroTTS(TTSPort):
         *,
         voice: str | None = None,
     ) -> AsyncIterator[AudioChunk]:
-        # KPipeline yields (graphemes, phonemes, audio) per internal segment; `audio` is float32
-        # in [-1, 1] at 24 kHz. Synthesis is seconds of CPU work, so each segment runs in a thread:
-        # on the event loop it would freeze mic reading and make barge-in impossible.
-        segments = iter(self._pipeline(text, voice=voice or self.default_voice))
-        while (seg := await asyncio.to_thread(next, segments, None)) is not None:
-            _gs, _ps, audio = seg
-            pcm16 = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
-            yield AudioChunk(pcm=pcm16, sample_rate=TTS_SAMPLE_RATE)
-        yield AudioChunk(done=True)
+        # ~0.5s of CPU per sentence: run it in a thread. On the event loop it would freeze mic
+        # reading for that long and make barge-in impossible.
+        audio, _sr = await asyncio.to_thread(
+            self._kokoro.create, text, voice=voice or self.default_voice
+        )
+        yield AudioChunk(pcm=(np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+        yield AudioChunk(done=True, sample_rate=TTS_SAMPLE_RATE)

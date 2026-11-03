@@ -7,7 +7,7 @@ real. All of it falls out of the **word-timestamped** transcripts that Groq Whis
 returns (`Transcript.words` — each has `start`/`end` in seconds).
 
 The pipeline collects, per session, a list of the learner's `Transcript`s (their turns) and the
-total wall-clock conversation duration, then calls `compute_delivery_metrics(...)`.
+total time the agent spoke, then calls `compute_delivery_metrics(...)`.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ FILLER_WORDS = {"um", "uh", "er", "ah", "like", "you know", "i mean", "sort of",
 
 def compute_delivery_metrics(
     learner_turns: Sequence[Transcript],
-    total_conversation_s: float,
+    agent_speaking_s: float,
 ) -> DeliveryMetrics:
     """How the learner spoke, from word-timestamped STT.
 
@@ -59,9 +59,12 @@ def compute_delivery_metrics(
         wpm=(total_words / (speaking_time_s / 60)) if speaking_time_s > 0 else 0.0,
         filler_count=filler_count,
         fillers_per_min=(filler_count / (speaking_time_s / 60)) if speaking_time_s > 0 else 0.0,
-        talk_ratio=min(1.0, speaking_time_s / total_conversation_s)
-        if total_conversation_s > 0
+        # Talk:listen = your speech vs the agent's. NOT vs the wall clock: typing, thinking and
+        # silence would deflate it (a mixed text+voice session read 11% that way).
+        talk_ratio=speaking_time_s / (speaking_time_s + agent_speaking_s)
+        if speaking_time_s + agent_speaking_s > 0
         else 0.0,
+        spoken_turns=sum(1 for t in learner_turns if t.words),
         longest_pause_s=longest_pause_s,
         speaking_time_s=speaking_time_s,
     )

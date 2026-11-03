@@ -4,9 +4,9 @@
 # STT (Groq Whisper) reuses the `groq` package from requirements-providers.txt — no extra dep.
 # The echo STT/TTS adapters need NONE of the below; they run the pipeline at $0.
 
-# TTS — Kokoro (Apache-2.0, local, 24kHz) is OPTIONAL and not installed here: it pulls torch +
-# spacy, and spacy doesn't build on Python 3.14 (verified 2026-11-01). To use it, run a 3.12/3.13
-# venv and `pip install kokoro`; KokoroTTS auto-registers when the package is importable.
+# TTS — Kokoro (Apache-2.0, local, 24kHz) via kokoro-onnx: onnxruntime, no torch/spacy (the official
+# `kokoro` package can't build on Python 3.14). `make voice` downloads the int8 weights (~120MB).
+kokoro-onnx>=0.4
 
 # Turn detection (TODO #1) — Silero VAD (MIT) + Smart-Turn v3 (BSD-2).
 # NOT the `silero-vad` pip package — it hard-requires torch (~700MB) just to wrap a 2.3MB ONNX

@@ -10,8 +10,8 @@
  * This is a working scaffold. The interesting backend craft (turn detection, barge-in,
  * delivery metrics) lives server-side as your three TODOs; this client just moves audio.
  *
- * NOTE: mic capture here uses a ScriptProcessor for brevity. For production, port the capture
- * to an AudioWorklet (off the main thread) — see
+ * ponytail: mic capture uses ScriptProcessor (deprecated, runs on the main thread, but supported
+ * everywhere). Port to an AudioWorklet if the UI thread gets busy enough to drop audio:
  * https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet
  */
 
@@ -37,14 +37,33 @@ export interface DeliveryMetrics {
   talk_ratio: number;
   longest_pause_s: number;
   speaking_time_s: number;
+  spoken_turns: number;
 }
 
 export interface VoiceSessionConfig {
   scenario?: unknown; // a ScenarioConfig; omit to use the backend sample
+  messages?: { role: string; content: string }[]; // prior chat history: text + voice are one conversation
   provider?: string | null; // chat LLM provider
   stt?: string | null; // "echo" | "groq"
   tts?: string | null; // "echo" | "kokoro"
   onEvent: (e: VoiceEvent) => void;
+  onClose?: () => void; // the session ended (normal end, server error, or network drop)
+}
+
+export interface VoiceProviders {
+  stt: { name: string; ready: boolean }[];
+  tts: { name: string; ready: boolean }[];
+}
+
+export async function getVoiceProviders(): Promise<VoiceProviders> {
+  const res = await fetch(`${API_URL}/api/voice/providers`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`voice providers ${res.status}`);
+  return res.json();
+}
+
+/** Best ready adapter, in preference order (real before echo). */
+export function pickProvider(list: { name: string; ready: boolean }[], prefs: string[]): string {
+  return prefs.find((p) => list.some((x) => x.name === p && x.ready)) ?? "echo";
 }
 
 /** Float32 [-1,1] -> Int16 PCM, with naive linear resampling from `inRate` to `outRate`. */
@@ -66,10 +85,19 @@ export class VoiceSession {
   private node?: ScriptProcessorNode;
   private playhead = 0; // scheduled-audio cursor for gap-free playback
   private scheduled = new Set<AudioBufferSourceNode>(); // queued speech, so barge-in can stop it
+  private closed: Promise<void> = Promise.resolve();
+  private mutedUntil = 0; // performance.now() deadline; see muteFor()
 
   constructor(private cfg: VoiceSessionConfig) {}
 
   async start(): Promise<void> {
+    // Mic first: if permission is denied we fail before opening a server session.
+    // Echo cancellation keeps the agent's own voice (from speakers) out of the mic, which would
+    // otherwise trigger barge-in on itself. Headphones are still the most reliable.
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+
     this.ws = new WebSocket(WS_URL);
     this.ws.binaryType = "arraybuffer";
 
@@ -85,13 +113,24 @@ export class VoiceSession {
 
     await new Promise<void>((resolve, reject) => {
       this.ws!.onopen = () => resolve();
-      this.ws!.onerror = () => reject(new Error("voice websocket failed"));
+      this.ws!.onerror = () => {
+        this.stream?.getTracks().forEach((t) => t.stop());
+        reject(new Error("Voice connection failed — is the backend running?"));
+      };
+    });
+    this.closed = new Promise<void>((resolve) => {
+      this.ws!.onclose = () => {
+        this.teardownAudio();
+        this.cfg.onClose?.();
+        resolve();
+      };
     });
 
     // Handshake: send the session config first.
     this.ws.send(
       JSON.stringify({
         scenario: this.cfg.scenario,
+        messages: this.cfg.messages ?? [],
         provider: this.cfg.provider,
         stt: this.cfg.stt,
         tts: this.cfg.tts,
@@ -99,7 +138,6 @@ export class VoiceSession {
     );
 
     // Mic capture -> PCM16@16k -> WS.
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     this.ctx = new AudioContext();
     this.playhead = this.ctx.currentTime;
     const src = this.ctx.createMediaStreamSource(this.stream);
@@ -107,7 +145,8 @@ export class VoiceSession {
     this.node.onaudioprocess = (e) => {
       if (this.ws?.readyState !== WebSocket.OPEN) return;
       const pcm = toPcm16(e.inputBuffer.getChannelData(0), this.ctx!.sampleRate, MIC_RATE);
-      this.ws.send(pcm);
+      // While muted, send silence of the same length: the server's turn clocks keep advancing.
+      this.ws.send(performance.now() < this.mutedUntil ? new ArrayBuffer(pcm.byteLength) : pcm);
     };
     src.connect(this.node);
     this.node.connect(this.ctx.destination);
@@ -137,16 +176,34 @@ export class VoiceSession {
     this.playhead = this.ctx?.currentTime ?? 0;
   }
 
-  /** End the turn/session cleanly (-> backend computes delivery metrics). */
+  /** Silence the mic for `ms` — call on each keystroke: keyboard clicks reaching the mic were
+   *  becoming phantom turns (Whisper transcribes non-speech as "Thank you."). */
+  muteFor(ms: number): void {
+    this.mutedUntil = performance.now() + ms;
+  }
+
+  /** A typed turn mid-session: the agent answers it (spoken) with the full conversation. */
+  sendText(text: string): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "text", text }));
+  }
+
+  /** End the session: the server replies with delivery metrics, then closes the socket. */
   async stop(): Promise<void> {
-    try {
-      this.ws?.send(JSON.stringify({ type: "end" }));
-    } catch {
-      /* already closing */
+    this.node?.disconnect(); // stop sending mic audio
+    this.stream?.getTracks().forEach((t) => t.stop());
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "end" }));
+      // Wait for the server's close (metrics arrive first); don't hang forever if it never comes.
+      await Promise.race([this.closed, new Promise((r) => setTimeout(r, 5000))]);
     }
+    this.ws?.close();
+    this.teardownAudio();
+  }
+
+  private teardownAudio(): void {
+    this.flushPlayback();
     this.node?.disconnect();
     this.stream?.getTracks().forEach((t) => t.stop());
-    await this.ctx?.close();
-    this.ws?.close();
+    if (this.ctx && this.ctx.state !== "closed") void this.ctx.close();
   }
 }

@@ -11,8 +11,9 @@ Both run torch-free via onnxruntime. Models live in backend/models/ (`make voice
     chunk ─► Silero p(speech) ≥ vad_threshold?
        yes ─► in a turn already? no → emit speech_started.  Reset silence clock.
        no  ─► (only while in a turn) silence clock += 32ms
-                 ≥ check_after_ms, not yet checked this pause → Smart-Turn(whole turn)
-                       p(complete) ≥ turn_threshold → emit speech_ended
+                 ≥ check_after_ms (200), not yet checked this pause → Smart-Turn(whole turn)
+                 complete AND ≥ min_endpoint_ms (500) → emit speech_ended
+                       (resumed speech before then cancels the verdict)
                  ≥ max_silence_ms → emit speech_ended   (fallback: never wait forever)
 
 The contract the pipeline relies on: `feed(frame) -> TurnEvent | None`, `is_speaking`,
@@ -21,6 +22,7 @@ The contract the pipeline relies on: `feed(frame) -> TurnEvent | None`, `is_spea
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -39,6 +41,11 @@ CHUNK_BYTES = CHUNK_SAMPLES * 2  # PCM16
 CHUNK_MS = CHUNK_SAMPLES / STT_SAMPLE_RATE * 1000
 SILERO_CONTEXT = 64  # samples of the previous chunk Silero wants prepended
 TURN_WINDOW = 8 * STT_SAMPLE_RATE  # Smart-Turn looks at the last 8s of the turn
+# Pre-roll: the start of an utterance is quiet (soft consonants, browser auto-gain/noise suppression
+# ramping up, Silero confirming late after a state reset), so it scores below the speech threshold
+# and was being dropped — "The load scenario was…" reached STT as "notification service." Keep the
+# last ~320ms and prepend it when a turn starts (OpenAI uses 300ms, LiveKit 500ms).
+PREROLL_CHUNKS = 10
 
 # Silero's RNN state drifts during long non-speech and then under-reports the next speech
 # (Pipecat's finding). Reset it after ~2s of audio, but only at a run of clearly-silent chunks so
@@ -69,6 +76,7 @@ def _to_float(pcm16: bytes) -> np.ndarray:
 @dataclass
 class TurnEvent:
     kind: str  # "speech_started" | "speech_ended"
+    reason: str = ""  # why a turn ended: "smart_turn" | "max_silence" | "max_turn" (for logs)
 
 
 class TurnDetector:
@@ -78,7 +86,8 @@ class TurnDetector:
         self,
         vad_threshold: float = 0.5,
         turn_threshold: float = 0.5,
-        check_after_ms: int = 200,  # silence before asking Smart-Turn
+        check_after_ms: int = 200,  # ask Smart-Turn here: it was trained on ~200ms trailing silence
+        min_endpoint_ms: int = 500,  # but don't END before this much silence (200 cut speech off)
         max_silence_ms: int = 3000,  # give up waiting even if Smart-Turn says "incomplete"
         max_turn_ms: int = 60_000,  # hard cap: steady noise must not grow a turn forever
     ) -> None:
@@ -86,8 +95,13 @@ class TurnDetector:
         self.vad_threshold = vad_threshold
         self.turn_threshold = turn_threshold
         self.check_after_ms = check_after_ms
+        self.min_endpoint_ms = min_endpoint_ms
         self.max_silence_ms = max_silence_ms
         self.max_turn_ms = max_turn_ms
+        # Session-level pause tracking (NOT cleared per turn). Whisper's word timestamps swallow
+        # silence (a 1.5s pause showed as 0.00s gaps), so the VAD measures pauses instead.
+        self.longest_pause_ms = 0.0
+        self._since_speech_ms: float | None = None  # silence since the learner's last speech
         self.reset()
 
     def reset(self) -> None:
@@ -96,7 +110,9 @@ class TurnDetector:
         self._in_turn = False
         self._silence_ms = 0.0
         self._checked_this_pause = False
+        self._complete = False  # Smart-Turn's verdict for the current pause
         self._utterance = bytearray()  # the whole current turn, handed to STT
+        self._preroll: deque[bytes] = deque(maxlen=PREROLL_CHUNKS)  # audio just before a turn
         self._speech_ms = 0.0  # speech-only time in this turn (pauses excluded) — barge-in guard
 
     @property
@@ -125,36 +141,59 @@ class TurnDetector:
                 self._in_turn
                 and len(self._utterance) / 2 / STT_SAMPLE_RATE * 1000 >= self.max_turn_ms
             ):
-                event = self._end()
+                event = self._end("max_turn")
         return event
 
+    def agent_took_turn(self) -> None:
+        """The agent replied: silence until the learner speaks again is listening, not a pause."""
+        self._since_speech_ms = None
+
+    def prepend(self, audio: bytes, speech_ms: float) -> None:
+        """Put an earlier, untranscribed part of the same thought in front of this turn."""
+        self._utterance[:0] = audio
+        self._speech_ms += speech_ms
+
     def _feed_chunk(self, chunk: bytes) -> TurnEvent | None:
-        if self._speech_prob(chunk) >= self.vad_threshold:
+        speech = self._speech_prob(chunk) >= self.vad_threshold
+        if speech:
+            if self._since_speech_ms is not None:  # a pause while the learner holds the floor
+                self.longest_pause_ms = max(self.longest_pause_ms, self._since_speech_ms)
+            self._since_speech_ms = 0.0
+        elif self._since_speech_ms is not None:
+            self._since_speech_ms += CHUNK_MS
+
+        if speech:
             self._silence_ms = 0.0
             self._checked_this_pause = False  # speech resumed → re-check at the next pause
+            self._complete = False
             self._speech_ms += CHUNK_MS
-            self._utterance.extend(chunk)
             if not self._in_turn:
                 self._in_turn = True
+                self._utterance.extend(b"".join(self._preroll))  # the quiet start of the turn
+                self._preroll.clear()
+                self._utterance.extend(chunk)
                 return TurnEvent("speech_started")
+            self._utterance.extend(chunk)
             return None
 
         if not self._in_turn:
-            return None  # silence between turns: ignore
+            self._preroll.append(chunk)  # between turns: remember, in case speech starts next
+            return None
 
         self._utterance.extend(chunk)  # keep in-turn pauses so STT/metrics see real timing
         self._silence_ms += CHUNK_MS
         if self._silence_ms >= self.max_silence_ms:
-            return self._end()
+            return self._end("max_silence")
         if self._silence_ms >= self.check_after_ms and not self._checked_this_pause:
             self._checked_this_pause = True
-            if self._turn_complete_prob() >= self.turn_threshold:
-                return self._end()
+            self._complete = self._turn_complete_prob() >= self.turn_threshold
+        if self._complete and self._silence_ms >= self.min_endpoint_ms:
+            return self._end("smart_turn")
         return None
 
-    def _end(self) -> TurnEvent:
+    def _end(self, reason: str) -> TurnEvent:
         self._in_turn = False
-        return TurnEvent("speech_ended")
+        return TurnEvent("speech_ended", reason)
 
     def _reset_vad(self) -> None:
         self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)  # Silero RNN memory

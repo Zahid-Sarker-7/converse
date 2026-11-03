@@ -58,3 +58,18 @@ def test_turn_is_capped_at_max_length():
     loud = b"\x00\x40" * turn_mod.CHUNK_SAMPLES
     kinds = [e.kind for _ in range(12) if (e := td.feed(loud))]
     assert kinds[:2] == ["speech_started", "speech_ended"]  # forced end at 10 chunks = 320ms
+
+
+def test_typed_text_mid_session_gets_a_reply():
+    with TestClient(app) as c, c.websocket_connect("/api/voice/session") as ws:
+        ws.send_text(json.dumps({**ECHO, "messages": [{"role": "assistant", "content": "Hi?"}]}))
+        ws.send_text(json.dumps({"type": "text", "text": "hello there"}))
+        reply = None
+        while reply is None:
+            msg = ws.receive()
+            if msg.get("text"):
+                e = json.loads(msg["text"])
+                if e["type"] == "transcript" and e["role"] == "assistant":
+                    reply = e["text"]
+        ws.send_text(json.dumps({"type": "end"}))
+    assert "hello there" in reply  # echo LLM replies with the typed text

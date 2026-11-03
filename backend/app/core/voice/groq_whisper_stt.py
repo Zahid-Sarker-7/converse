@@ -33,6 +33,16 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
+# Whisper is trained to write clean prose, so it silently drops "um/uh" — which zeroed the filler
+# metric and hid hesitations from the judge. A prompt is style context, not an instruction: one
+# written WITH fillers biases verbatim output (OpenAI docs: prompting for "filler words"), and a
+# spelling list fixes terms it mangled ("RAC"→RAG, "Popsub"→Pub/Sub). Limit: 224 tokens.
+WHISPER_PROMPT = (
+    "Umm, so, uh, I was like, hmm... you know, I mean, we, um, used Pub/Sub, RAG, MCP, "
+    "Kubernetes, PostgreSQL, Redis, Kafka, gRPC, LLM, API, and, uh, CI/CD."
+)
+
+
 class GroqWhisperSTT(STTPort):
     name = "groq"
     ready = True
@@ -58,6 +68,7 @@ class GroqWhisperSTT(STTPort):
             response_format="verbose_json",  # needed for timestamps
             timestamp_granularities=["word"],  # -> per-word start/end
             language=language,  # None lets Whisper auto-detect
+            prompt=WHISPER_PROMPT,
             temperature=0,
         )
         # `resp.words` is a list of {word, start, end} when word granularity is requested.

@@ -8,9 +8,10 @@ mic audio UP while the server streams speech DOWN, and barge-in needs both at on
 one-way, so it can't carry the mic.
 
 Wire protocol:
-  client -> server : first a TEXT frame = JSON session config (see `SessionConfig`);
-                     thereafter BINARY frames = raw PCM16 @ 16 kHz mic audio,
-                     and TEXT frame {"type":"end"} to end the session (-> delivery metrics).
+  client -> server : first a TEXT frame = JSON config {scenario?, messages? (prior chat history),
+                     provider?, stt?, tts?}; then BINARY frames = raw PCM16 @ 16 kHz mic audio,
+                     TEXT {"type":"text","text":...} = a typed turn (no STT), and
+                     TEXT {"type":"end"} to end the session (-> delivery metrics).
   server -> client : TEXT frames = JSON `VoiceEvent`; BINARY frames = PCM16 @ 24 kHz to play.
 """
 
@@ -24,6 +25,7 @@ import re
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from ..agents.schemas import SAMPLE_SCENARIO, ScenarioConfig
+from ..core.model_port import ChatMessage
 from ..logging import get_logger
 from ..voice.pipeline import VoicePipeline
 from ..voice.schemas import VoiceEvent
@@ -78,6 +80,7 @@ async def session(ws: WebSocket) -> None:
         cfg = await ws.receive_json()
         if not isinstance(cfg, dict):
             raise _HandshakeError("config must be a JSON object")
+        history = [ChatMessage.model_validate(m) for m in cfg.get("messages") or []]
         scenario = (
             ScenarioConfig.model_validate(cfg["scenario"])
             if cfg.get("scenario")
@@ -96,7 +99,12 @@ async def session(ws: WebSocket) -> None:
         return
 
     pipeline = VoicePipeline(
-        scenario=scenario, chat_port=chat_port, stt=stt, tts=tts, tts_voice=settings.kokoro_voice
+        scenario=scenario,
+        chat_port=chat_port,
+        stt=stt,
+        tts=tts,
+        tts_voice=settings.kokoro_voice,
+        history=history,
     )
 
     # 2. Pump: the ONLY writer to the socket. A ("close", None) item ends it after everything
@@ -122,11 +130,15 @@ async def session(ws: WebSocket) -> None:
                 break
             if (data := msg.get("bytes")) is not None:
                 await pipeline.on_audio_frame(data)
-            elif (text := msg.get("text")) is not None and _is_end(text):
-                await pipeline.finish()
-                await pipeline.out.put(("close", None))
-                await asyncio.wait_for(pump_task, timeout=5)  # metrics delivered, then close
-                break
+            elif (text := msg.get("text")) is not None:
+                ctrl = _control(text)
+                if ctrl.get("type") == "text" and str(ctrl.get("text", "")).strip():
+                    await pipeline.on_text(str(ctrl["text"]).strip())  # typed mid-session
+                elif ctrl.get("type") == "end":
+                    await pipeline.finish()
+                    await pipeline.out.put(("close", None))
+                    await asyncio.wait_for(pump_task, timeout=5)  # metrics delivered, then close
+                    break
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
@@ -139,10 +151,10 @@ async def session(ws: WebSocket) -> None:
             await ws.close()
 
 
-def _is_end(text: str) -> bool:
-    """Control frames are JSON; anything malformed is ignored rather than ending the session."""
+def _control(text: str) -> dict:
+    """Control frames are JSON objects; anything malformed is ignored, not fatal."""
     try:
         msg = json.loads(text)
     except ValueError:
-        return False
-    return isinstance(msg, dict) and msg.get("type") == "end"
+        return {}
+    return msg if isinstance(msg, dict) else {}
