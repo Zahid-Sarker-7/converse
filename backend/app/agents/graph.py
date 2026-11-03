@@ -222,14 +222,23 @@ def build_graph(chat_port: ModelPort, judge_port: ModelPort):
         scenario = state["scenario"]
         system_prompt = (
             "You are an impartial judge grading a role-play. Read the full conversation "
-            "between the interviewer (assistant) and the candidate (user), then grade "
-            "ONLY the candidate. "
+            "between the INTERVIEWER and the CANDIDATE, then grade ONLY the candidate. "
             f"Score each of these criteria from 1 to 5: {scenario.rubric}. "
             "Judge each criterion independently and ignore answer length. "
-            "For every criterion, quote a VERBATIM line from the candidate's (user) turns "
+            "For every criterion, quote a VERBATIM line from the CANDIDATE's turns "
             "as evidence — if you cannot quote it, score low — and give a one-line rationale."
         )
-        messages = [ChatMessage(role=Role.system, content=system_prompt), *state["messages"]]
+        # The judge observes the conversation; it isn't a participant. Pass the transcript as one
+        # block of text, not as chat turns: as turns, the interviewer's lines would pose as the
+        # judge's OWN replies, and Gemini rejects input that ends on a model turn (400).
+        speaker = {Role.assistant: "INTERVIEWER", Role.user: "CANDIDATE"}
+        transcript = "\n".join(
+            f"{speaker[m.role]}: {m.content}" for m in state["messages"] if m.role in speaker
+        )
+        messages = [
+            ChatMessage(role=Role.system, content=system_prompt),
+            ChatMessage(role=Role.user, content=f"Transcript to grade:\n\n{transcript}"),
+        ]
         scorecard = await judge_port.structured_output(messages=messages, schema=Scorecard)
         return {"scorecard": scorecard}
 

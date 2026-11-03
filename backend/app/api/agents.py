@@ -17,8 +17,10 @@ from pydantic import BaseModel
 from ..agents.graph import build_graph
 from ..agents.schemas import SAMPLE_SCENARIO, ScenarioConfig, Scorecard
 from ..core.model_port import ChatMessage, Role
+from ..logging import get_logger
 
 router = APIRouter(prefix="/roleplay")
+log = get_logger("roleplay")
 
 
 class TurnRequest(BaseModel):
@@ -68,6 +70,13 @@ async def _run(port, state: dict) -> dict:
         return await graph.ainvoke(state)
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except Exception as exc:
+        # Unhandled errors become a bare 500 WITHOUT CORS headers, which the browser reports as
+        # an opaque "Failed to fetch". Surface provider failures as a readable 502 instead.
+        log.error("roleplay_error", error=f"{type(exc).__name__}: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=502, detail=f"Model provider error — {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 @router.post("/turn")

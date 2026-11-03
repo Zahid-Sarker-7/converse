@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { RefreshCw, Sparkles, Trophy, X, Zap } from "lucide-react";
+import { Mic, MicOff, RefreshCw, Sparkles, Trophy, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   getSampleScenario,
@@ -12,6 +12,13 @@ import {
   type Scorecard as ScorecardData,
   type ScenarioConfig,
 } from "@/lib/api";
+import {
+  getVoiceProviders,
+  pickProvider,
+  VoiceSession,
+  type DeliveryMetrics,
+  type VoiceEvent,
+} from "@/lib/voice";
 import { Scorecard } from "./Scorecard";
 import {
   Banner,
@@ -26,6 +33,59 @@ import {
 } from "./ui";
 
 type Turn = ChatMessage & { note?: string | null };
+type VoiceState = "off" | "connecting" | "listening" | "thinking" | "speaking" | "ending";
+
+const VOICE_LABEL: Record<VoiceState, string> = {
+  off: "",
+  connecting: "Connecting…",
+  listening: "Listening — speak any time",
+  thinking: "Thinking…",
+  speaking: "Speaking — talk over it to interrupt",
+  ending: "Wrapping up…",
+};
+
+function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-white/5 px-3 py-2">
+      <div className="text-xs text-muted">{label}</div>
+      <div className="text-lg font-semibold tabular-nums">{value}</div>
+      <div className="text-[11px] text-muted">{sub}</div>
+    </div>
+  );
+}
+
+/** How the learner spoke (voice sessions only) — benchmarks from interview/sales corpora. */
+function DeliveryCard({ m }: { m: DeliveryMetrics }) {
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex items-baseline justify-between gap-2">
+        <h3 className="text-sm font-semibold">Delivery</h3>
+        <span className="text-xs text-muted">
+          {m.spoken_turns} spoken turn{m.spoken_turns === 1 ? "" : "s"} in the last voice session ·
+          typed turns not counted
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Pace" value={`${Math.round(m.wpm)} wpm`} sub="target 140–160" />
+        <Stat
+          label="Fillers per minute"
+          value={m.fillers_per_min.toFixed(1)}
+          sub={`${m.filler_count} um/uh/like in total · target < 8`}
+        />
+        <Stat
+          label="You vs AI talk"
+          value={`${Math.round(m.talk_ratio * 100)}%`}
+          sub="target ~43%"
+        />
+        <Stat
+          label="Longest pause"
+          value={`${m.longest_pause_s.toFixed(1)}s`}
+          sub="target < 2s"
+        />
+      </div>
+    </Card>
+  );
+}
 
 const BLANK: ScenarioConfig = {
   title: "",
@@ -104,8 +164,77 @@ export function RoleplayStudio({
   const [scoreError, setScoreError] = useState<string | null>(null);
   const [card, setCard] = useState<ScorecardData | null>(null);
 
+  const [voiceState, setVoiceState] = useState<VoiceState>("off");
+  const [voiceInfo, setVoiceInfo] = useState("");
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<DeliveryMetrics | null>(null);
+  const voiceRef = useRef<VoiceSession | null>(null);
+  const voiceOn = voiceState !== "off";
+
   const endRef = useRef<HTMLDivElement>(null);
   const offline = !health;
+
+  // Leaving the page mid-session must release the mic and the server session.
+  useEffect(() => () => void voiceRef.current?.stop(), []);
+
+  // Mirrors the server: a user line the agent never answered (its reply was interrupted) is the
+  // same answer continuing, so it joins the previous user bubble instead of fragmenting.
+  function addTurn(role: Turn["role"], content: string) {
+    setTurns((prev) => {
+      const last = prev[prev.length - 1];
+      if (role === "user" && last?.role === "user")
+        return [...prev.slice(0, -1), { ...last, content: `${last.content} ${content}` }];
+      return [...prev, { role, content }];
+    });
+  }
+
+  function onVoiceEvent(e: VoiceEvent) {
+    if (e.type === "state" && e.state) setVoiceState(e.state);
+    else if (e.type === "transcript" && e.role && e.text) addTurn(e.role, e.text); else if (e.type === "metrics" && e.metrics) setMetrics(e.metrics);
+    else if (e.type === "error") setVoiceError(e.message ?? "voice error");
+  }
+
+  async function startVoice() {
+    if (voiceOn || offline) return;
+    setVoiceError(null);
+    setMetrics(null);
+    setVoiceState("connecting");
+    // A reply mid-typewriter isn't in `turns` yet (state updates are async): include it explicitly.
+    const history = typing ? [...turns, { role: "assistant" as const, content: typing.content }] : turns;
+    commitTyping();
+    try {
+      const vp = await getVoiceProviders();
+      const stt = pickProvider(vp.stt, ["groq"]);
+      const tts = pickProvider(vp.tts, ["kokoro"]);
+      setVoiceInfo(`${stt} → ${provider || "default"} → ${tts}`);
+      const session = new VoiceSession({
+        scenario: buildScenario(),
+        // Text and voice are one conversation: the voice session continues this history.
+        messages: history.map((t) => ({ role: t.role, content: t.content })),
+        provider: provider || null,
+        stt,
+        tts,
+        onEvent: onVoiceEvent,
+        onClose: () => {
+          voiceRef.current = null;
+          setVoiceState("off");
+        },
+      });
+      voiceRef.current = session;
+      await session.start();
+    } catch (e) {
+      voiceRef.current = null;
+      setVoiceState("off");
+      setVoiceError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function stopVoice() {
+    setVoiceState("ending");
+    await voiceRef.current?.stop();
+    voiceRef.current = null;
+    setVoiceState("off");
+  }
 
   function applyScenario(s: ScenarioConfig) {
     setScenario(s);
@@ -148,6 +277,13 @@ export function RoleplayStudio({
   async function send() {
     const text = input.trim();
     if (!text || sending || offline) return;
+    if (voiceOn) {
+      // Mid voice session: same conversation over the socket; the reply comes back spoken.
+      setInput("");
+      addTurn("user", text);
+      voiceRef.current?.sendText(text);
+      return;
+    }
     setSending(true);
     setTurnError(null);
     setInput("");
@@ -315,7 +451,7 @@ export function RoleplayStudio({
             </p>
           </div>
           <div className="flex gap-2">
-            {turns.length > 0 && (
+            {turns.length > 0 && !voiceOn && (
               <Button
                 variant="subtle"
                 size="sm"
@@ -323,6 +459,7 @@ export function RoleplayStudio({
                   setTurns([]);
                   setTyping(null);
                   setTurnError(null);
+                  setMetrics(null);
                 }}
               >
                 Reset
@@ -330,7 +467,7 @@ export function RoleplayStudio({
             )}
             <Button
               onClick={scoreMe}
-              disabled={!hasReplies || scoring || offline}
+              disabled={!hasReplies || scoring || offline || voiceOn}
               title={!hasReplies ? "Have a conversation first" : "Score this session"}
             >
               <Trophy size={16} />
@@ -407,13 +544,37 @@ export function RoleplayStudio({
         </Card>
 
         {turnError && <Banner tone="danger">{turnError}</Banner>}
+        {voiceError && <Banner tone="danger">{voiceError}</Banner>}
+        {metrics && !voiceOn && <DeliveryCard m={metrics} />}
+
+        {voiceOn && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 px-4 py-2.5">
+            <div className="flex items-center gap-2 text-sm">
+              <motion.span
+                className="h-2.5 w-2.5 rounded-full bg-accent"
+                animate={
+                  voiceState === "listening" || voiceState === "speaking"
+                    ? { scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }
+                    : {}
+                }
+                transition={{ repeat: Infinity, duration: 1.2 }}
+              />
+              {VOICE_LABEL[voiceState]}
+            </div>
+            <span className="hidden text-xs text-muted sm:block">
+              {voiceInfo} · headphones recommended
+            </span>
+          </div>
+        )}
         {scoreError && (
           <Banner tone="danger">
             {scoreError}
-            <span className="mt-1 block text-xs text-muted">
-              Scoring needs structured output — Groq and Gemini support it, Echo
-              doesn&apos;t. Pick Groq or Gemini as the provider.
-            </span>
+            {judgeProvider === "echo" && (
+              <span className="mt-1 block text-xs text-muted">
+                Scoring needs structured output — Groq and Gemini support it, Echo
+                doesn&apos;t. Pick Groq or Gemini as the provider.
+              </span>
+            )}
           </Banner>
         )}
 
@@ -422,15 +583,26 @@ export function RoleplayStudio({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              voiceRef.current?.muteFor(1500); // keyboard clicks must not become voice turns
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
               }
             }}
-            placeholder="Your turn…  (Enter to send)"
+            placeholder={voiceOn ? "Speak, or type here…  (Enter to send)" : "Your turn…  (Enter to send)"}
             rows={2}
             disabled={offline}
           />
+          <Button
+            variant={voiceOn ? "danger" : "ghost"}
+            onClick={voiceOn ? stopVoice : startVoice}
+            disabled={offline || voiceState === "connecting" || voiceState === "ending"}
+            className="h-[46px]"
+            title={voiceOn ? "End the voice session and get delivery metrics" : "Talk instead of typing"}
+          >
+            {voiceOn ? <MicOff size={16} /> : <Mic size={16} />}
+            {voiceOn ? "End" : "Talk"}
+          </Button>
           <Button
             onClick={send}
             disabled={sending || offline}
@@ -471,6 +643,11 @@ export function RoleplayStudio({
                 </Button>
               </div>
               <Scorecard card={card} />
+              {metrics && (
+                <div className="mt-4">
+                  <DeliveryCard m={metrics} />
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}

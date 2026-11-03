@@ -56,20 +56,28 @@ Other targets: `make backend`, `make frontend`, `make stop`, `make health`, `mak
 
 ### Voice (Phase 2)
 
-Speak to the persona over a WebSocket: turn detection (Silero VAD + Smart-Turn v3, local ONNX)
-→ STT (Groq Whisper) → the same LangGraph loop → TTS, with barge-in and delivery metrics.
+Speak to the persona: turn detection (Silero VAD + Smart-Turn v3) → STT (Groq Whisper) → the same
+LangGraph loop → TTS (Kokoro), with barge-in and delivery metrics. All models run locally via
+onnxruntime (no torch); only STT + the LLM call Groq's free tier.
 
 ```bash
-make providers voice     # Groq SDK + onnxruntime; downloads the two turn-detection models
-make backend             # terminal 1 — watch the per-step logs
-cd backend               # terminal 2 — a scripted "mic" over the real WebSocket:
-say -o /tmp/me.wav --data-format=LEI16@16000 "Um, so I led the migration. [[slnc 1500]] It was hard."
-.venv/bin/python scripts/voice_client.py /tmp/me.wav --stt groq   # prints events + metrics
+make providers voice   # Groq SDK + onnxruntime/kokoro-onnx; downloads Silero, Smart-Turn, Kokoro (~130MB)
+make dev               # backend :8000 + frontend :3000 (add GROQ_API_KEY to backend/.env first)
 ```
 
-Defaults are `VOICE_STT_PROVIDER=echo` / `VOICE_TTS_PROVIDER=echo` ($0, no keys, silent audio).
-Real speech out needs Kokoro: `pip install kokoro` in a Python 3.12/3.13 venv (its spacy
-dependency doesn't build on 3.14); it auto-registers as `--tts kokoro`.
+**In the UI:** Role-play → **Talk** → allow the mic → speak (talk over the persona to interrupt) →
+**End** → the Delivery card appears (pace, fillers, talk share, longest pause) → **Score me** grades
+the spoken transcript. The UI picks the best ready adapters (Groq STT, Kokoro TTS, else echo).
+Headphones recommended (echo cancellation is on, but speakers can still bleed into the mic).
+
+**Without a browser** (scripted mic over the real WebSocket):
+
+```bash
+cd backend
+say -o /tmp/me.wav --data-format=LEI16@16000 "Um, so I led the migration. [[slnc 1500]] It was hard."
+.venv/bin/python scripts/voice_client.py /tmp/me.wav --stt groq --tts kokoro && afplay /tmp/agent.wav
+```
+
 Browser origins must be in `CORS_ORIGINS` (the WebSocket checks `Origin`; CORS alone doesn't).
 
 ## Endpoints

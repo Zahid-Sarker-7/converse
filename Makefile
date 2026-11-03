@@ -3,6 +3,7 @@ PY ?= python3
 BACKEND := backend
 VENV := $(BACKEND)/.venv
 BIN := $(VENV)/bin
+KOKORO_URL := https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
 
 .PHONY: help setup setup-backend setup-frontend backend frontend dev stop health graph test lint fmt providers voice clean
 
@@ -27,13 +28,17 @@ setup-frontend: ## install frontend deps, seed .env.local
 providers: ## install provider SDKs (do this when starting the adapter TODOs)
 	$(BIN)/pip install -r $(BACKEND)/requirements-providers.txt
 
-voice: ## install voice deps (onnxruntime) + download the Silero & Smart-Turn models
+voice: ## install voice deps + download Silero, Smart-Turn & Kokoro (TTS) models
 	$(BIN)/pip install -r $(BACKEND)/requirements-voice.txt
 	@mkdir -p $(BACKEND)/models
 	@test -f $(BACKEND)/models/silero_vad.onnx || curl -sL -o $(BACKEND)/models/silero_vad.onnx \
 		https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
 	@test -f $(BACKEND)/models/smart-turn-v3.2-cpu.onnx || curl -sL -o $(BACKEND)/models/smart-turn-v3.2-cpu.onnx \
 		https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx
+	@test -f $(BACKEND)/models/kokoro-v1.0.int8.onnx || curl -sL -o $(BACKEND)/models/kokoro-v1.0.int8.onnx \
+		$(KOKORO_URL)/kokoro-v1.0.int8.onnx
+	@test -f $(BACKEND)/models/voices-v1.0.bin || curl -sL -o $(BACKEND)/models/voices-v1.0.bin \
+		$(KOKORO_URL)/voices-v1.0.bin
 
 backend: ## run FastAPI with reload (http://localhost:8000)
 	cd $(BACKEND) && .venv/bin/uvicorn app.main:app --reload --port 8000

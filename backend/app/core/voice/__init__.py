@@ -33,15 +33,10 @@ def build_stt_registry(settings) -> dict[str, STTPort]:
 
 def build_tts_registry(settings) -> dict[str, TTSPort]:
     registry: dict[str, TTSPort] = {"echo": EchoTTS()}
-    # Kokoro is a local model (no key) — register it only if the package is importable so a
-    # fresh checkout without the voice deps still boots on echo.
-    try:
-        import importlib.util
+    # Kokoro is local (no key): register it only when `kokoro-onnx` + its model files exist, so a
+    # fresh checkout without `make voice` still boots on echo.
+    from . import kokoro_tts
 
-        if importlib.util.find_spec("kokoro") is not None:
-            from .kokoro_tts import KokoroTTS
-
-            registry["kokoro"] = KokoroTTS(default_voice=settings.kokoro_voice)
-    except Exception:  # noqa: BLE001 — never let an optional adapter break startup
-        pass
+    if kokoro_tts.available():
+        registry["kokoro"] = kokoro_tts.KokoroTTS(default_voice=settings.kokoro_voice)
     return registry

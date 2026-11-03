@@ -176,14 +176,15 @@ LangGraph loop **unchanged**: `turn-detect → STT → graph(mode=chat) → sent
 | `VoicePort` = `STTPort` + `TTSPort` + types (`Word`/`Transcript`/`AudioChunk`) | ✅ | `core/voice_port.py` |
 | `EchoSTT`/`EchoTTS` ($0, keyless — run the whole pipeline) | ✅ | `core/voice/echo_voice.py` |
 | `GroqWhisperSTT` (free tier, `verbose_json` word timestamps, batch per-utterance) | ✅ | `core/voice/groq_whisper_stt.py` |
-| `KokoroTTS` (Apache-2.0, local, 24kHz, float32→PCM16) | ✅ | `core/voice/kokoro_tts.py` |
+| `KokoroTTS` via **kokoro-onnx** (int8, onnxruntime, no torch — official `kokoro` can't build on Py3.14); ~0.5s first audio, ~5× realtime on CPU; runs in a thread | ✅ (2026-11-02) | `core/voice/kokoro_tts.py` |
 | STT/TTS registries (register on key/package present) | ✅ | `core/voice/__init__.py` |
 | WS route `/session` + `/providers`; config/`.env`/`requirements-voice.txt`/`make voice` | ✅ | `api/voice.py`, `config.py` |
 | Pipeline orchestration (STT→graph→sentence-chunk TTS, out-queue) | ✅ | `app/voice/pipeline.py` |
-| Frontend voice client (mic→16k PCM16→WS→24k playback) | ✅ scaffold | `frontend/lib/voice.ts` *(not tsc-verified yet)* |
+| Frontend voice: **Talk/End** in Role-play studio, live status line, transcripts in the thread, Delivery card (inline + in scorecard); client fixes (mic before socket, wait for metrics before close, onClose, AEC constraints) | ✅ tsc + build clean; **real-UI E2E verified** (Chrome fake mic → Groq STT → LLM → Kokoro → Delivery card) | `frontend/components/RoleplayStudio.tsx`, `lib/voice.ts` |
 | **TODO #1** Turn detection — Silero VAD + Smart-Turn v3.2-cpu, both raw ONNX via onnxruntime (no torch); 512-sample chunk buffering, Smart-Turn on the whole turn after 200ms silence, 3s max-silence fallback | ✅ (AI-implemented on request, 2026-10-24) | `app/voice/turn.py` |
 | **TODO #2** Barge-in — `speech_ms`≥200ms guard, cancel + drop queued audio + client `interrupt` flush; blips ignored | ✅ (AI, 2026-11-01) | `app/voice/pipeline.py::_barge_in` |
 | E2E client (scripted mic over the real WS) | ✅ | `backend/scripts/voice_client.py` |
+| Live-use fixes (2026-11-03, from real sessions): judge gets transcript as one labelled block (Gemini 400 on trailing model turn) + provider errors → 502; text+voice one conversation (history in handshake, typed turns mid-session); turn = Smart-Turn at 200ms but end ≥500ms; continuation merge; noise floor 250ms + Whisper-phantom filter ("Thank you."); mute-while-typing; talk:listen vs agent speech; pre-roll 320ms; carry untranscribed audio across barge-in; VAD-measured pauses (Whisper absorbs silence); Whisper filler/vocab prompt; hold 3s on unfinished-sounding text; end-reason logging | ✅ 32 tests · live-verified | `voice/*`, `api/*`, `agents/graph.py`, `RoleplayStudio.tsx` |
 | **TODO #3** Delivery metrics — WPM/fillers (punctuation-normalized, two-word phrases)/talk-ratio/longest in-turn pause | ✅ (Zahid, 2026-11-01) | `app/voice/metrics.py` |
 | Hardening — WS Origin check, handshake validation, sentinel-flushed metrics, 60s turn cap, Kokoro off-loop, PII at DEBUG | ✅ | `api/voice.py`, `voice/*` · `tests/test_voice_ws.py` |
 | Tests (`tests/test_voice.py`) — skip-gated acceptance, 2 live + 3 TODO-gated | ✅ | 8 pass / 3 skip |
