@@ -51,6 +51,7 @@ from __future__ import annotations
 
 # You'll add imports as you go. Expect to need (find the exact lines in the docs):
 import operator
+import re
 from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -85,6 +86,9 @@ from .schemas import ScenarioConfig, Scorecard
 # Evaluator (T6) grades the LEARNER, so pull `evidence` quotes from the user (learner) turns.
 # ──────────────────────────────────────────────────────────────────────────────
 
+
+# A whole trailing parenthetical/bracketed aside, e.g. "… right? (Waiting for your details.)"
+_TRAILING_ASIDE = re.compile(r"\s*[\(\[][^()\[\]]*[\)\]]\s*$")
 
 # ── T1: Define the graph state ────────────────────────────────────────────────
 # ### TODO: ConverseState   [track: C-project]  [status: done]
@@ -212,10 +216,14 @@ def build_graph(chat_port: ModelPort, judge_port: ModelPort):
             f"Director note - {note}, if a director note is available, "
             "pivot the next turn of the conversation based on the note; otherwise "
             "follow a natural flow based on the previous conversation, or end the "
-            "conversation if there is no more to discuss."
+            "conversation if there is no more to discuss. "
+            "Output ONLY the words you say to the candidate: no stage directions, no notes in "
+            "parentheses or brackets (e.g. never '(Waiting for your details.)'), no narration."
         )
         messages = [ChatMessage(role=Role.system, content=system_prompt)] + state["messages"]
         reply = "".join([chunk.delta async for chunk in chat_port.stream_chat(messages=messages)])
+        # Belt and braces: a trailing "(stage direction)" would be shown AND read aloud by TTS.
+        reply = _TRAILING_ASIDE.sub("", reply).strip()
         return {"messages": [ChatMessage(role=Role.assistant, content=reply)]}
 
     async def evaluator(state: ConverseState) -> dict:
@@ -226,7 +234,10 @@ def build_graph(chat_port: ModelPort, judge_port: ModelPort):
             f"Score each of these criteria from 1 to 5: {scenario.rubric}. "
             "Judge each criterion independently and ignore answer length. "
             "For every criterion, quote a VERBATIM line from the CANDIDATE's turns "
-            "as evidence — if you cannot quote it, score low — and give a one-line rationale."
+            "as evidence — if you cannot quote it, score low — and give a one-line rationale. "
+            "Write `summary` and `focus_next` as coaching addressed directly TO THE CANDIDATE in "
+            "second person ('you'), e.g. 'Quantify your result: say how many weeks you saved.' "
+            "Never address the interviewer or refer to 'the candidate' there."
         )
         # The judge observes the conversation; it isn't a participant. Pass the transcript as one
         # block of text, not as chat turns: as turns, the interviewer's lines would pose as the

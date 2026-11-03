@@ -102,3 +102,15 @@ def test_score_path_produces_a_scorecard():
         )
     )
     assert isinstance(result["scorecard"], Scorecard)
+
+
+def test_trailing_stage_direction_is_stripped_but_inline_asides_kept():
+    from app.agents.graph import _TRAILING_ASIDE
+
+    strip = lambda t: _TRAILING_ASIDE.sub("", t).strip()  # noqa: E731
+    assert strip("Could you share the numbers? (Waiting for your details.)") == (
+        "Could you share the numbers?"
+    )
+    assert strip("We used Redis (an in-memory store) for caching.") == (
+        "We used Redis (an in-memory store) for caching."
+    )
