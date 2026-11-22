@@ -98,6 +98,20 @@ async def session(ws: WebSocket) -> None:
         await ws.close(code=1008)
         return
 
+    if settings.voice_engine == "pipecat":
+        from ..voice.bot import run_session  # lazy: the hand-built engine runs without Pipecat
+
+        await run_session(
+            ws,
+            settings=settings,
+            scenario=scenario,
+            history=history,
+            chat_port=chat_port,
+            stt_name=stt.name,
+            tts_name=tts.name,
+        )
+        return
+
     pipeline = VoicePipeline(
         scenario=scenario,
         chat_port=chat_port,

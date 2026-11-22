@@ -5,13 +5,13 @@
 > and full feature taxonomy live in `../ventures/roadmap/` (`project-plan.md`, `STATE.md`)
 > and `../ventures/11-milestone-project.md`.
 
-**Status at a glance** — _updated 2026-10-04_
+**Status at a glance** — _updated 2026-11-08_
 
 | Phase | Title | Status |
 |:--:|-------|--------|
 | 0 | Foundations (FastAPI + Next.js + Model port) | ✅ **Done** |
 | 1 | Multi-agent text core (LangGraph) | ✅ **Done** |
-| 2 | Voice (STT→LLM→TTS, barge-in) | ✅ **Hand-built done** (Pipecat migration planned, see STATE 2026-11-01) |
+| 2 | Voice (STT→LLM→TTS, barge-in) | ✅ **Hand-built done** · 🟡 **Pipecat migration scaffolded** (2026-11-08, 2 hands-on TODOs — §5 Phase 2b) |
 | 3 | Vision (optional) | ⬜ Planned |
 | 4 | Evals & CI | ⬜ Planned |
 | 5 | Memory & personalization | ⬜ Planned |
@@ -57,9 +57,9 @@ LLM-judge scores the transcript against a rubric with quoted evidence.
  │   Orchestrator (LangGraph) ✅  — graph of agent nodes over shared state (reused by voice) │
  │     ├─ Scenario-Director ✅   ├─ Role-Player ✅   └─ Evaluator (LLM-judge) ✅            │
  │                                                                                        │
- │   Voice port 🟡 ── STT (transcribe) · TTS (synthesize)   (adapters: echo ✅,            │
+ │   Voice port ✅ ── STT (transcribe) · TTS (synthesize)   (adapters: echo ✅,            │
  │     │               Groq-Whisper ✅, Kokoro ✅)  +  WS pipeline turn→STT→graph→TTS       │
- │     └─ hands-on TODOs: turn detection · barge-in · delivery metrics                     │
+ │     └─ engine: hand-built ✅ (default) │ Pipecat 1.15 🟡 (VOICE_ENGINE=pipecat, Phase 2b) │
  │                                                                                        │
  │   [Planned] Vision port · Memory port · Guardrail port · Eval port · OTel              │
  └────────────────────────────────────────────────────────────────────────────────────────┘
@@ -85,6 +85,7 @@ LangChain model wrappers** and no extra provider deps.
 | D6 | **Postgres deferred to Phase 5** | Phase 1 is a text-core demo; DB belongs with memory + LangGraph checkpointer | scaffolding SQLAlchemy now (YAGNI) |
 | D7 | **Frontend = Tailwind v4 + `motion` + `lucide-react`, hand-rolled design system** | most polish per line, React 19 + SSR native, zero JS config; gauge is custom SVG regardless | **shadcn/ui** (radix + CLI ceremony for little gain here), `next-themes` (dark-only), `react-countup`/chart libs (motion + SVG cover it) |
 | D8 | **Voice = our own WS pipeline behind a `VoicePort` (STTPort+TTSPort); STT Groq Whisper (free, word timestamps, batch-per-utterance) · TTS Kokoro (Apache-2.0, local, sentence-chunked) · turn = Silero VAD + Smart-Turn v3 (all $0)** | reuses the port pattern (mirrors D1 — hand-building is the lesson, keeps the abstraction visible, zero lock-in); reuses the Phase-1 LangGraph loop unchanged; WS (not SSE) for two-way interruptible audio; verified current Oct-2026 (Principle 0) | **LiveKit/Pipecat framework** (owns the loop, hides the learning — deferred for telephony/scale); browser Web Speech (prototype-grade, no word timestamps → weak metrics — kept as FE v0 only); Piper TTS (active fork is GPL-3.0); Deepgram STT (true streaming but paid) |
+| D9 | **Voice plumbing on Pipecat 1.15 (supersedes the "own WS pipeline" half of D8; Decision 2026-11-01).** Keep the brain (LangGraph), scoring and metrics maths; Pipecat owns transport, turn-taking (Silero + Smart-Turn v3, its *default* strategy = what `turn.py` hand-built), barge-in (`InterruptionFrame`) and TTS pacing. The graph plugs in as a custom `FrameProcessor` in place of `LLMService`; a custom `FrameSerializer` keeps the browser wire protocol byte-identical (frontend untouched); migration behind a `VOICE_ENGINE` strangler flag. Verified on **Python 3.14** (2026-11-08): core + Silero + Smart-Turn + Groq + FastAPI WS import and run; use `pipecat-ai[websocket,groq]`, **not** `[kokoro]` (pins kokoro-onnx ≥0.5 = Py<3.14; `KokoroTTSService` runs fine on 0.4.7). Uses the current `PipelineWorker` + `WorkerRunner.add_workers()` API (`PipelineTask`/`PipelineRunner` deprecated since 1.3). | hand-built plumbing taught the concepts; re-owning queue/cancel code has low marginal value; shipping on a framework is the marketable skill; no Py downgrade needed | pin a 3.12/3.13 venv (unnecessary); RTVI protocol + Pipecat JS client (would rewrite `voice.ts` — later, with a transport change); LiveKit Agents (phone/SIP strengths not needed yet; next rung of the voice ladder) |
 
 Model defaults (verified live): `GROQ_MODEL=openai/gpt-oss-120b` (Groq dropped Llama 3.x
 instruct), `GEMINI_MODEL=gemini-3.1-flash-lite` (`gemini-3.7-flash` is quota-blocked on free tier).
@@ -191,8 +192,59 @@ LangGraph loop **unchanged**: `turn-detect → STT → graph(mode=chat) → sent
 
 v0 browser Web Speech (serverless) is noted as an even-cheaper FE fallback; the server
 pipeline is chosen because the three learning TODOs (VAD/turn, barge-in, word-timestamp
-metrics) only exist there. **LiveKit/Pipecat deferred** (see D8). **Exit:** talk to the
+metrics) only exist there. ~~LiveKit/Pipecat deferred (D8)~~ → superseded by **D9**: plumbing moves to Pipecat now that the concepts are learned (Phase 2b). **Exit:** talk to the
 persona live, be interrupted cleanly, and get a scorecard with delivery metrics.
+
+### Phase 2b — Voice on Pipecat 🟡 Scaffolded (2026-11-08)
+**Goal:** same product behaviour, framework plumbing. Reference = tag `v0.2-hand-built-voice`.
+Runs behind `VOICE_ENGINE=pipecat` (default stays `handbuilt` until cutover); the browser
+protocol and `voice.ts` are unchanged.
+
+```
+  WS ─► transport.input ─► STT ─► VoiceEvents ─► DeliveryTracker ─► user aggregator
+        (ConverseSerializer)  (Groq words | echo)  (TODO #2)        (Silero VAD + Smart-Turn v3)
+     ─► ConverseBrain (TODO #1: LangGraph, unchanged) ─► TTS (Kokoro | echo)
+     ─► transport.output (ConverseSerializer) ─► WS               ─► assistant aggregator
+  barge-in: user speech → InterruptionFrame → processors cancel in-flight work, output drops
+            unsent audio, serializer sends {"type":"interrupt"} → browser flushes playback
+  end:      {"type":"end"} → interrupt, then EndWorkerFrame → tracker emits metrics → close
+```
+
+**Hand-built → Pipecat map**
+
+| Hand-built (v0.2) | Pipecat 1.15 | At cutover |
+|---|---|---|
+| `turn.py` Silero + Smart-Turn, vendored `whisper_features.py` | default user-turn strategy (`SileroVADAnalyzer` + `LocalSmartTurnAnalyzerV3`, v3.2 ONNX bundled) | delete |
+| knobs 200ms check / 500ms end / 3s max silence / 200ms barge-in guard | `VADParams(start_secs=0.2, stop_secs=0.5, confidence=0.5)`, `SmartTurnParams(stop_secs=3.0)` | keep values (Pipecat warns 0.5≠0.2 tuned — re-test live) |
+| pre-roll 320ms · Silero RNN reset · carry untranscribed audio across barge-in | `SegmentedSTTService` 1s pre-buffer + background STT queue · built-in reset | delete |
+| 60s turn cap | — | dropped (`ponytail:` in `bot.py`) |
+| `pipeline.py` `_respond` task, `_barge_in`, `_drop_queued_audio`, out-queue + pump | interruption semantics + output transport | delete |
+| sentence chunking for TTS | TTS text aggregation | delete |
+| `GroqWhisperSTT` (filler/vocab prompt, word timestamps) + phantom filter | `GroqWordsSTT` (`SegmentedSTTService`, `TranscriptionFrame.result` = our `Transcript`) | ported ✅ |
+| `KokoroTTS` | `KokoroTTSService` (int8 weights from `make voice`) | delete adapter |
+| echo STT/TTS | `EchoSTT` / `EchoTTS` services | ported ✅ |
+| origin check + handshake validation (`api/voice.py`) | unchanged, runs before Pipecat | keep |
+| `graph.py`, `compute_delivery_metrics`, schemas, Scorecard | unchanged | keep |
+| unfinished-hold, joining continuations, `VOICE_STYLE` | inside `ConverseBrain` (`to_chat_messages` joins consecutive user lines) | keep (moved) |
+
+| Component | Status | Where |
+|---|:--:|---|
+| `ConverseSerializer` · `GroqWordsSTT` · echo services · `VoiceEvents` (state + user transcript) · assembly (`run_session`) · `VOICE_ENGINE` flag | ✅ AI | `voice/bot.py`, `api/voice.py`, `config.py` |
+| `to_chat_messages` (context → graph messages, join unanswered lines) | ✅ AI | `voice/brain.py` |
+| **TODO #1** `ConverseBrain.process_frame` — LangGraph as a frame processor (LLM response frames, speculation, unfinished-hold, interruption = free cancel) | ⬜ Zahid | `voice/brain.py` |
+| **TODO #2** `DeliveryTracker.process_frame` — metrics inputs from frames (transcript words, bot-speaking time, VAD pauses), metrics before `EndFrame` | ⬜ Zahid | `voice/delivery.py` |
+| Tests: 4 plumbing ✅ · 4 TODO-gated · route contract parametrized over both engines (pipecat half = cutover gate) | ✅ | `tests/test_voice_pipecat.py`, `tests/test_voice_ws.py` |
+
+Verified 2026-11-08 with a reference implementation of both TODOs (then removed): the gated tests go
+green, real speech E2E (`say` → Silero/Smart-Turn → Groq Whisper → graph → Kokoro: fillers kept,
+pause-split turn interrupted mid-think and joined into one reply), and the **real-UI E2E** (Chrome
+fake mic: text → Talk → typed-in-voice → End → Delivery card → Score me) on both engines.
+
+**Cutover checklist (after both TODOs)**
+1. Delete `@TODO_BRAIN` / `@TODO_TRACKER` and `CUTOVER_GATE` → `make test` green.
+2. One live voice session on `VOICE_ENGINE=pipecat` (incl. barge-in + a thinking pause); try VAD `stop_secs` 0.2 vs 0.5.
+3. Flip `voice_engine` default → `pipecat`; re-run the real-UI E2E + demo script.
+4. Delete `pipeline.py`, `turn.py`, `whisper_features.py`, the hand-built STT/TTS adapters + their registries (keep a name list for `/providers` + handshake), the `TurnDetector`/`VoicePipeline` tests, the handbuilt test param + flag, and the Silero/Smart-Turn downloads in `make voice`. First move the live-tuned constants they export (`WHISPER_PROMPT`, `WHISPER_PHANTOMS`, `PHANTOM_MAX_SPEECH_MS`, `VOICE_STYLE`, `_looks_unfinished`, `UNFINISHED_HOLD_S`, Kokoro paths) into `bot.py`/`brain.py`.
 
 ### Phase 3 — Vision ⬜ Planned (optional)
 "AI sees your slide": screen/slide capture (`getDisplayMedia`) → vision LLM feeds "did they
@@ -235,6 +287,7 @@ running app from the same engine.
 | Graph | unit-test node logic (director), routing, topology (both paths) with `EchoAdapter` + `asyncio.run` (no pytest-asyncio dep) | ✅ |
 | Evaluator | score-path unit test via a `FakeJudge` (no keys); Gemini judge live-verified over HTTP | ✅ |
 | Voice | echo STT/TTS drive the full pipeline (no keys/network): turn-detector start/end + one STT→graph→TTS turn; 3 skip-gated acceptance tests tied to the TODOs (turn-waits-through-pause, barge-in-stops-and-drains, metrics-from-timestamps) | 🟡 2 live / 3 TODO-gated |
+| Voice on Pipecat | serializer/STT/calibration/context-mapping unit tests; brain + tracker via `pipecat.tests.utils.run_test` / direct `process_frame` (TODO-gated); WS route contract parametrized over both engines | 🟡 4 live / 4 TODO-gated / 4 cutover-gated |
 | Regression (Phase 4) | judge calibration vs gold set; CI gate blocks on score regression | ⬜ |
 
 Run: `make test` · `make lint` · `make providers` (installs `groq`, `google-genai`, `langgraph`).
@@ -249,4 +302,7 @@ Run: `make test` · `make lint` · `make providers` (installs `groq`, `google-ge
 | Provider model IDs / free tiers drift monthly | verify IDs live before relying on defaults (Principle 0) |
 | Realtime voice needs a persistent host (Vercel can't) | Phase 2: LiveKit Cloud + Modal/Deno backend; keep FE on Vercel |
 | Gemini free tier trains on inputs, no EEA/UK | non-sensitive test data only; note in privacy stance (Phase 8) |
+| Pipecat API churn (weekly releases; `PipelineTask` deprecated in 1.3) | pin `pipecat-ai>=1.15,<2`; current `PipelineWorker`/`WorkerRunner` API; fix deprecation warnings as they appear |
+| `[kokoro]` extra unusable on Py3.14 | install `pipecat-ai[websocket,groq]` + `kokoro-onnx 0.4.x` + `requests` (verified) |
+| Kokoro ONNX loaded per Pipecat session (~1s) | `ponytail:` in `bot.py` — share one `Kokoro` if sessions pile up |
 | LLM-judge drift over time | calibration set + CI gate (Phase 4) |

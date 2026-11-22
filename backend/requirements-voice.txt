@@ -14,3 +14,10 @@ kokoro-onnx>=0.4
 onnxruntime>=1.19      # runs Silero VAD + Smart-Turn v3 torch-free on CPU
 # Smart-Turn's Whisper features: vendored numpy code (app/voice/whisper_features.py), no transformers.
 # Smart-Turn v3.2-cpu weights (int8, ~8MB) come from HF pipecat-ai/smart-turn-v3 via `make voice`.
+
+# Pipecat engine (VOICE_ENGINE=pipecat, app/voice/bot.py) — verified on Python 3.14 (2026-11-08).
+# NOT the `[kokoro]` extra: it pins kokoro-onnx>=0.5, whose releases all cap Python <3.14. Pipecat's
+# KokoroTTSService runs fine on kokoro-onnx 0.4.x above; it only needs `requests` at import.
+# Silero VAD + Smart-Turn v3.2 ship inside pipecat-ai (onnxruntime, no torch).
+pipecat-ai[websocket,groq]>=1.15,<2
+requests>=2.32

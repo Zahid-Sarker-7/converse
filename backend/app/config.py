@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     voice_tts_provider: str = "echo"  # echo | kokoro (local, Apache-2.0 — pip install kokoro)
     whisper_model: str = "whisper-large-v3-turbo"  # Groq STT model (free tier)
     kokoro_voice: str = "af_heart"  # Kokoro voice id (a=American English)
+    # handbuilt = app/voice/pipeline.py (tag v0.2-hand-built-voice) · pipecat = app/voice/bot.py.
+    # Strangler switch for the migration: flip to pipecat once its TODOs + tests are green.
+    voice_engine: str = "handbuilt"
 
 
 @lru_cache

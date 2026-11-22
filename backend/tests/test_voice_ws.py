@@ -8,11 +8,24 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from app.config import get_settings
 from app.main import app
 from app.voice import turn as turn_mod
 from app.voice.turn import TurnDetector
 
 ECHO = {"provider": "echo", "stt": "echo", "tts": "echo"}
+
+
+CUTOVER_GATE = pytest.mark.skip(reason="Pipecat cutover gate — delete once TODOs #1 + #2 are green")
+
+
+@pytest.fixture(params=["handbuilt", pytest.param("pipecat", marks=CUTOVER_GATE)])
+def engine(request, monkeypatch):
+    """The route contract must hold on both engines — the Pipecat cutover gate."""
+    if request.param == "pipecat":
+        pytest.importorskip("pipecat")
+    monkeypatch.setattr(get_settings(), "voice_engine", request.param)
+    return request.param
 
 
 def _events(ws) -> list[dict]:
@@ -28,21 +41,21 @@ def _events(ws) -> list[dict]:
             out.append(json.loads(msg["text"]))
 
 
-def test_foreign_browser_origin_is_rejected():
+def test_foreign_browser_origin_is_rejected(engine):
     with TestClient(app) as c, pytest.raises(WebSocketDisconnect) as exc:
         with c.websocket_connect("/api/voice/session", headers={"origin": "https://evil.example"}):
             pass
     assert exc.value.code == 1008
 
 
-def test_bad_handshake_gets_an_error_then_close():
+def test_bad_handshake_gets_an_error_then_close(engine):
     with TestClient(app) as c, c.websocket_connect("/api/voice/session") as ws:
         ws.send_text(json.dumps({**ECHO, "stt": "nope"}))
         events = _events(ws)
     assert events[0]["type"] == "error" and "nope" in events[0]["message"]
 
 
-def test_end_delivers_metrics_before_close():
+def test_end_delivers_metrics_before_close(engine):
     headers = {"origin": "http://localhost:3000"}
     with TestClient(app) as c, c.websocket_connect("/api/voice/session", headers=headers) as ws:
         ws.send_text(json.dumps(ECHO))
@@ -60,7 +73,7 @@ def test_turn_is_capped_at_max_length():
     assert kinds[:2] == ["speech_started", "speech_ended"]  # forced end at 10 chunks = 320ms
 
 
-def test_typed_text_mid_session_gets_a_reply():
+def test_typed_text_mid_session_gets_a_reply(engine):
     with TestClient(app) as c, c.websocket_connect("/api/voice/session") as ws:
         ws.send_text(json.dumps({**ECHO, "messages": [{"role": "assistant", "content": "Hi?"}]}))
         ws.send_text(json.dumps({"type": "text", "text": "hello there"}))
