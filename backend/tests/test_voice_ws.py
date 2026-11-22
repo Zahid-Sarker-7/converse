@@ -16,10 +16,7 @@ from app.voice.turn import TurnDetector
 ECHO = {"provider": "echo", "stt": "echo", "tts": "echo"}
 
 
-CUTOVER_GATE = pytest.mark.skip(reason="Pipecat cutover gate — delete once TODOs #1 + #2 are green")
-
-
-@pytest.fixture(params=["handbuilt", pytest.param("pipecat", marks=CUTOVER_GATE)])
+@pytest.fixture(params=["handbuilt", "pipecat"])
 def engine(request, monkeypatch):
     """The route contract must hold on both engines — the Pipecat cutover gate."""
     if request.param == "pipecat":

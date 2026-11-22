@@ -12,16 +12,25 @@ standard LLM response frames, which the TTS speaks and the assistant aggregator 
 
 from __future__ import annotations
 
+import asyncio
+
 from pipecat.frames.frames import (
     Frame,
     LLMContextFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from ..agents.graph import build_graph
 from ..agents.schemas import ScenarioConfig
 from ..core.model_port import ChatMessage, ModelPort, Role
-from .pipeline import VOICE_STYLE
+from ..logging import get_logger
+from .pipeline import UNFINISHED_HOLD_S, VOICE_STYLE, _looks_unfinished
+from .schemas import VoiceEvent
+
+log = get_logger("voice")
 
 
 def to_chat_messages(context_messages: list[dict]) -> list[ChatMessage]:
@@ -53,44 +62,49 @@ class ConverseBrain(FrameProcessor):
         self.graph = build_graph(chat_port=chat_port, judge_port=chat_port)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """### TODO #1: The brain as a frame processor  [track: C-project]  [status: todo]
+        """Answer each finished user turn; pass every other frame through untouched.
 
-        - What:  answer each finished user turn with the role-play graph. On an `LLMContextFrame`:
-                 (1) skip it if `frame.speculation` (a provisional turn must never reach the user);
-                 (2) `to_chat_messages(frame.context.get_messages())`; do nothing unless the last
-                     message is the user's;
-                 (3) send a "thinking" `state` event; if `_looks_unfinished(last line)`: send
-                     "listening", `await asyncio.sleep(UNFINISHED_HOLD_S)`, then "thinking" again;
-                 (4) `await self.graph.ainvoke({"scenario": self.scenario, "messages": msgs,
-                     "mode": "chat"})` — exactly what `/api/roleplay/turn` does; reply = the
-                     last message;
-                 (5) send the assistant `transcript` event, then push the three LLM response
-                     frames: `LLMFullResponseStartFrame`, `LLMTextFrame(reply)`,
-                     `LLMFullResponseEndFrame`.
-                 Every OTHER frame: pass it on unchanged, in the direction it came (as below).
-        - Why:   this is the core Pipecat idea: everything is a frame flowing through processors,
-                 and a processor is `process_frame` + `push_frame`. Swapping Pipecat's `LLMService`
-                 for your LangGraph brain is the "framework, but our brain" decision in one class.
-                 Watch what you DON'T write: no task, no cancel, no barge-in code. When the learner
-                 talks over the agent, Pipecat sends an `InterruptionFrame` and cancels whatever
-                 `process_frame` is awaiting (your graph call, or the hold's sleep). Compare with
-                 `_respond_task` + `_barge_in` in `pipeline.py` — that's what the framework bought.
-        - How:   events are `bot.event_frame(VoiceEvent(...))` (import inside the method: `bot`
-                 imports this module). Push frames with `await self.push_frame(frame)`. Keep
-                 `await super().process_frame(frame, direction)` as the first line — it's how
-                 Pipecat's own Start/End/Interruption handling runs.
-        - Working with: `to_chat_messages` + `__init__` above (already done) · `VOICE_STYLE`,
-                 `_looks_unfinished`, `UNFINISHED_HOLD_S` (pipeline.py, live-tuned) · events the
-                 browser expects: `schemas.VoiceEvent`.
-        - Docs & SDKs:  https://docs.pipecat.ai/pipecat/fundamentals/custom-frame-processor
-                 https://docs.pipecat.ai/pipecat/fundamentals/interruptions
-                 https://docs.pipecat.ai/pipecat/learn/context-management
-                 reference: `pipecat/services/llm_service.py` (how a real LLM service does it).
-        - Acceptance: delete the `@TODO_BRAIN` lines in `tests/test_voice_pipecat.py` → green
-                 (reply via the echo LLM; speculative/answered turns ignored; an interruption
-                 cancels the unfinished-hold and the joined turn gets ONE reply).
+        No task, no cancel, no barge-in code: when the learner talks over the agent, Pipecat sends
+        an `InterruptionFrame` and cancels whatever this method is awaiting (the graph call or the
+        unfinished-hold sleep). Compare `_respond_task` + `_barge_in` in the hand-built engine.
         """
         await super().process_frame(frame, direction)
-        # TODO #1: handle LLMContextFrame as described above. Until then the agent stays silent.
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
+        elif not frame.speculation:  # a provisional turn must never reach the user
+            await self._respond(frame.context.get_messages())
+
+    async def _respond(self, context_messages: list[dict]) -> None:
+        from .bot import event_frame  # bot imports this module
+
+        messages = to_chat_messages(context_messages)
+        if not messages or messages[-1].role != Role.user:
+            return  # already answered (e.g. a context frame after the agent's own turn)
+        await self.push_frame(event_frame(VoiceEvent(type="state", state="thinking")))
+        if _looks_unfinished(messages[-1].content):
+            # "...we had to" + silence: wait. If the learner resumes, the interruption cancels this
+            # sleep, and their next turn lands as a consecutive user line that we join.
+            log.info("held_unfinished", hold_s=UNFINISHED_HOLD_S)
+            await self.push_frame(event_frame(VoiceEvent(type="state", state="listening")))
+            await asyncio.sleep(UNFINISHED_HOLD_S)
+            await self.push_frame(event_frame(VoiceEvent(type="state", state="thinking")))
+
+        try:
+            result = await self.graph.ainvoke(
+                {"scenario": self.scenario, "messages": messages, "mode": "chat"}
+            )
+        except Exception as exc:  # noqa: BLE001 — provider down/quota: tell the learner, keep the call
+            log.error("voice_brain_error", error=f"{type(exc).__name__}: {exc}", exc_info=True)
+            await self.push_frame(
+                event_frame(VoiceEvent(type="error", message=f"{type(exc).__name__}: {exc}"))
+            )
+            await self.push_frame(event_frame(VoiceEvent(type="state", state="listening")))
+            return
+        reply = result["messages"][-1].content
+        log.info("llm_reply", chars=len(reply))
+        await self.push_frame(
+            event_frame(VoiceEvent(type="transcript", role="assistant", text=reply))
+        )
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(LLMTextFrame(reply))
+        await self.push_frame(LLMFullResponseEndFrame())

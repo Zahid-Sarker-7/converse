@@ -84,7 +84,10 @@ def test_serializer_speaks_the_unchanged_wire_protocol():
 
     mic, typed, end, junk, audio, flush, event = asyncio.run(run())
     assert isinstance(mic, InputAudioRawFrame) and mic.sample_rate == 16_000
-    assert isinstance(typed, LLMMessagesAppendFrame) and typed.messages[0]["content"] == "hi"
+    assert isinstance(typed, InputTransportMessageFrame) and typed.message == {
+        "type": "text",
+        "text": "hi",
+    }
     assert isinstance(end, InputTransportMessageFrame) and end.message["type"] == "end"
     assert junk == [None, None, None]  # malformed control frames are ignored, not fatal
     assert audio == b"\x02\x00"
@@ -130,7 +133,6 @@ def _brain() -> ConverseBrain:
     return ConverseBrain(scenario=SAMPLE_SCENARIO, chat_port=EchoAdapter())
 
 
-@TODO_BRAIN
 def test_brain_answers_a_user_turn_with_llm_response_frames():
     down, _ = asyncio.run(
         run_test(
@@ -146,7 +148,6 @@ def test_brain_answers_a_user_turn_with_llm_response_frames():
     assert any(e.get("state") == "thinking" for e in events)
 
 
-@TODO_BRAIN
 def test_brain_ignores_speculative_and_answered_turns():
     speculative = _context(("user", "Hello."))
     speculative.speculation = True
@@ -156,7 +157,6 @@ def test_brain_ignores_speculative_and_answered_turns():
     assert [f.text for f in down if isinstance(f, LLMTextFrame)] == ["echo> Real turn."]
 
 
-@TODO_BRAIN
 def test_unfinished_turn_waits_and_an_interruption_cancels_the_wait(monkeypatch):
     """'we had to...' → hold; the learner resumes (interruption) → no reply to the fragment; the
     joined turn gets ONE reply."""
@@ -182,7 +182,6 @@ def test_unfinished_turn_waits_and_an_interruption_cancels_the_wait(monkeypatch)
 # ── TODO #2 — DeliveryTracker ──────────────────────────────────────────────────────────────────
 
 
-@TODO_TRACKER
 def test_tracker_turns_frames_into_delivery_metrics(monkeypatch):
     """Two spoken turns, a 1.0s pause inside the learner's floor, 2s of agent speech → metrics
     sent before the EndFrame. (A pause across the agent's turn is listening, not a pause.)"""
@@ -225,3 +224,29 @@ def test_tracker_turns_frames_into_delivery_metrics(monkeypatch):
     assert metrics["longest_pause_s"] == 1.0
     speaking = metrics["speaking_time_s"]  # 1.45s + 0.85s of word timings
     assert round(metrics["talk_ratio"], 3) == round(speaking / (speaking + 2.0), 3)
+
+
+def test_brain_reports_a_failing_llm_and_keeps_the_call_alive():
+    class DownLLM(EchoAdapter):
+        async def stream_chat(self, messages, **kw):
+            raise RuntimeError("quota exceeded")
+            yield  # pragma: no cover — makes this an async generator
+
+    brain = ConverseBrain(scenario=SAMPLE_SCENARIO, chat_port=DownLLM())
+    down, _ = asyncio.run(run_test(brain, frames_to_send=[_context(("user", "Hello."))]))
+    assert not [f for f in down if isinstance(f, LLMTextFrame)]
+    errors = [e for e in _events(down) if e["type"] == "error"]
+    assert errors and "quota exceeded" in errors[0]["message"]
+    assert _events(down)[-1]["state"] == "listening"  # the learner can try again
+
+
+def test_typed_turn_interrupts_the_agent_then_joins_the_conversation():
+    down, up = asyncio.run(
+        run_test(
+            bot.VoiceEvents(),
+            frames_to_send=[InputTransportMessageFrame(message={"type": "text", "text": "Hi"})],
+        )
+    )
+    assert any(isinstance(f, InterruptionFrame) for f in up)  # stops the agent mid-sentence
+    (append,) = [f for f in down if isinstance(f, LLMMessagesAppendFrame)]
+    assert append.messages == [{"role": "user", "content": "Hi"}] and append.run_llm

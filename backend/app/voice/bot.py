@@ -105,15 +105,10 @@ class ConverseSerializer(FrameSerializer):
         if not isinstance(msg, dict):
             return None
         if msg.get("type") == "text" and (text := str(msg.get("text", "")).strip()):
-            # A typed turn: straight into the conversation, no STT, and the brain answers it.
-            # ponytail: typing while the agent talks doesn't interrupt it (the hand-built one did);
-            # push an InterruptionFrame first if that matters.
-            return LLMMessagesAppendFrame(
-                messages=[{"role": "user", "content": text}], run_llm=True
-            )
+            return InputTransportMessageFrame(message={"type": "text", "text": text})
         if msg.get("type") == "end":
-            return InputTransportMessageFrame(message=msg)  # VoiceEvents ends the session
-        return None
+            return InputTransportMessageFrame(message=msg)
+        return None  # VoiceEvents handles both control messages (they need an interruption first)
 
 
 # ── STT / TTS services ─────────────────────────────────────────────────────────────────────────
@@ -209,7 +204,7 @@ def make_tts(name: str, settings) -> TTSService:
 
         from ..core.voice.kokoro_tts import MODEL_PATH, VOICES_PATH
 
-        # ponytail: loads the ONNX model per session (~1s); share one Kokoro if sessions pile up.
+        # ponytail: loads the model per session (0.3s, measured); share one if sessions pile up.
         return KokoroTTSService(
             model_path=str(MODEL_PATH),
             voices_path=str(VOICES_PATH),
@@ -236,14 +231,10 @@ class VoiceEvents(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
-        if isinstance(frame, InputTransportMessageFrame) and frame.message.get("type") == "end":
-            # End = stop talking now, then end gracefully. A bare EndWorkerFrame would flush the
-            # agent's unplayed speech first (paced in real time), and the browser stops waiting
-            # for metrics after 5s. Interrupt drops it; the EndFrame then flows down in order, so
-            # the DeliveryTracker's metrics still reach the browser before the socket closes.
-            if direction == FrameDirection.DOWNSTREAM:  # the input transport broadcasts both ways
-                await self.broadcast_interruption()
-                await self.push_frame(EndWorkerFrame(reason="client ended the session"))
+        if isinstance(frame, InputTransportMessageFrame):
+            # The input transport broadcasts these both ways: act once, on the downstream copy.
+            if direction == FrameDirection.DOWNSTREAM:
+                await self._control(frame.message)
             return
         if (state := self._STATES.get(type(frame))) is not None:
             await self.push_frame(event_frame(VoiceEvent(type="state", state=state)))
@@ -252,6 +243,24 @@ class VoiceEvents(FrameProcessor):
                 event_frame(VoiceEvent(type="transcript", role="user", text=frame.text))
             )
         await self.push_frame(frame, direction)
+
+    async def _control(self, msg: dict) -> None:
+        if msg.get("type") == "text":
+            # A typed turn interrupts the agent (like speaking would), then goes straight into the
+            # conversation: no STT, and run_llm makes the aggregator hand the brain the context.
+            await self.broadcast_interruption()
+            await self.push_frame(
+                LLMMessagesAppendFrame(
+                    messages=[{"role": "user", "content": msg["text"]}], run_llm=True
+                )
+            )
+        elif msg.get("type") == "end":
+            # Stop talking now, then end gracefully. A bare EndWorkerFrame would flush the agent's
+            # unplayed speech first (paced in real time), and the browser stops waiting for metrics
+            # after 5s. The EndFrame then flows down in order, so the DeliveryTracker's metrics
+            # still reach the browser before the socket closes.
+            await self.broadcast_interruption()
+            await self.push_frame(EndWorkerFrame(reason="client ended the session"))
 
 
 # ── assembly ───────────────────────────────────────────────────────────────────────────────────
@@ -321,6 +330,13 @@ async def run_session(
     @transport.event_handler("on_client_disconnected")
     async def _disconnected(_transport, _ws) -> None:
         await worker.cancel()  # tab closed / network drop: no metrics, just stop
+
+    @worker.event_handler("on_pipeline_error")
+    async def _error(_worker, frame) -> None:
+        # STT/TTS failures (quota, network) become ErrorFrames; without this the turn just goes
+        # silent. The brain reports its own errors (it knows the turn is lost).
+        log.error("voice_pipeline_error", error=str(frame.error))
+        await worker.queue_frame(event_frame(VoiceEvent(type="error", message=str(frame.error))))
 
     await ws.send_text(VoiceEvent(type="state", state="listening").model_dump_json())
     runner = WorkerRunner(handle_sigint=False)
