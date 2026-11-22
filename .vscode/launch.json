@@ -13,6 +13,17 @@
       "console": "integratedTerminal"
     },
     {
+      "name": "Tests: voice pipeline (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q", "-x", "tests/test_voice_pipecat.py"],
+      "cwd": "${workspaceFolder}/backend",
+      "python": "${workspaceFolder}/backend/.venv/bin/python",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
       "name": "Frontend: Next.js server (debug)",
       "type": "node-terminal",
       "request": "launch",

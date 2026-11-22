@@ -6,4 +6,7 @@ pydantic-settings>=2.5
 python-dotenv>=1.0
 structlog>=24.4
 langgraph>=1.2  # Phase 1 multi-agent orchestration (agents/graph.py)
-numpy>=1.26  # Phase 2 voice: PCM16 <-> float audio (voice/turn.py is imported at startup)
+# Phase 2 voice engine (voice/bot.py, imported at startup). Verified on Python 3.14 (2026-11-08).
+# Silero VAD + Smart-Turn v3.2 ship inside it (onnxruntime, no torch), and the echo STT/TTS run on
+# it, so voice works at $0 with no keys. Pinned <2: it ships weekly and deprecates APIs often.
+pipecat-ai[websocket]>=1.15,<2

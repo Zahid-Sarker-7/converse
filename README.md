@@ -26,7 +26,7 @@ interview coach.
 ```bash
 cd converse
 make setup               # backend venv + deps, frontend npm install, seeds backend/.env
-make providers voice     # provider SDKs + voice models (~130 MB: Silero, Smart-Turn, Kokoro)
+make providers voice     # provider SDKs + Kokoro TTS model (~120 MB; Silero + Smart-Turn ship in pipecat-ai)
 # add your key:  GROQ_API_KEY=...  in backend/.env   (optional: GOOGLE_API_KEY for Gemini)
 make dev                 # backend → http://localhost:8000 · frontend → http://localhost:3000
 ```
@@ -58,14 +58,14 @@ flowchart LR
         R["/api/roleplay/turn · score<br/>(HTTP, text)"]
         V["/api/voice/session<br/>(WebSocket, audio)"]
         G["LangGraph orchestrator<br/>Director → Role-Player · Evaluator"]
-        VP["Voice pipeline<br/>turn detection · barge-in · metrics"]
+        VP["Voice pipeline · Pipecat<br/>turn detection · barge-in · metrics"]
     end
 
     subgraph PORTS["Ports → swappable adapters"]
         direction TB
         M["ModelPort<br/>Groq · Gemini · echo"]
-        S["STTPort<br/>Groq Whisper · echo"]
-        T["TTSPort<br/>Kokoro · echo"]
+        S["STT service<br/>Groq Whisper · echo"]
+        T["TTS service<br/>Kokoro · echo"]
     end
 
     UI -- text --> R --> G
@@ -93,14 +93,14 @@ trade-offs, workflow vs agent) · [**TDD.md**](TDD.md) (decisions, per-phase sta
 flowchart LR
     MIC["🎙️ Browser mic<br/>PCM16 · 16 kHz"] -- WebSocket --> TD
 
-    subgraph SERVER["Voice pipeline (server)"]
+    subgraph SERVER["Voice pipeline (server, Pipecat)"]
         direction LR
         TD["Turn detection<br/>Silero VAD + Smart-Turn v3"]
         STT["STT<br/>Groq Whisper"]
-        LLM["Same LangGraph loop<br/>(+ chat history)"]
+        LLM["Same LangGraph loop<br/>(ConverseBrain processor)"]
         TTS["TTS<br/>Kokoro, per sentence"]
         TD -- "turn ended" --> STT --> LLM --> TTS
-        TD -. "user talks over AI" .-> BI["Barge-in<br/>cancel + flush"]
+        TD -. "user talks over AI" .-> BI["Barge-in<br/>InterruptionFrame"]
         STT -. "word timings" .-> MET["Delivery metrics"]
     end
 
@@ -114,16 +114,17 @@ flowchart LR
 | **STT** | Groq `whisper-large-v3-turbo` | Free tier, word timestamps, prompted to keep fillers ("um/uh") and spell RAG/MCP/Pub/Sub. |
 | **LLM** | Groq `openai/gpt-oss-120b` (or Gemini) | Fast first token; replies kept to 1–3 spoken sentences in voice mode. |
 | **TTS** | Kokoro via `kokoro-onnx` (int8) | Apache-2.0, local, ~0.5 s to first audio, ~5× realtime on CPU. |
-| **Transport** | Our own WebSocket + ports | Full control and visibility. (LiveKit/Pipecat considered; Pipecat is the planned production migration.) |
+| **Orchestration** | [Pipecat](https://github.com/pipecat-ai/pipecat) 1.15 — FastAPI WebSocket transport + our serializer | The framework owns turn-taking, barge-in and audio pacing; our LangGraph brain and delivery metrics plug in as frame processors; the browser protocol didn't change. The hand-built pipeline it replaced is tag [`v0.2-hand-built-voice`](../../tree/v0.2-hand-built-voice). |
 
 **What makes it feel like a conversation** — each learned from real sessions:
 
 | Behaviour | How |
 |---|---|
-| Doesn't interrupt your thinking pauses | Smart-Turn checks at 200 ms of silence, but the turn only ends after ≥500 ms; a transcript that *sounds* unfinished ("we had to…") holds 3 s more |
-| You can interrupt it | ≥200 ms of your speech while it talks → generation cancelled, queued audio dropped, browser playback flushed |
-| Never loses your opening words | 320 ms pre-roll buffer; if you resume mid-transcription, the first part is carried into the next turn |
-| Ignores noise and keyboard clicks | mic muted while typing · turns with <250 ms of speech dropped · Whisper's "Thank you." hallucination filtered |
+| Doesn't interrupt your thinking pauses | Smart-Turn is asked after 300 ms of silence (it was trained on ~200 ms; at 500 ms it called a mid-thought pause "finished" — measured on real speech, guarded by a test); a transcript that *sounds* unfinished ("we had to…") holds 3 s more; if you resume, it's joined into the same answer |
+| You can interrupt it — by voice or by typing | ≥200 ms of your speech while it talks → generation cancelled, unsent audio dropped, browser playback flushed |
+| Never loses your opening words | 1 s pre-speech buffer in the STT stage; transcription runs off the audio path, so speaking during it loses nothing |
+| Ignores noise and keyboard clicks | mic muted while typing · the VAD needs 200 ms of speech · Whisper's "Thank you." hallucination filtered |
+| Ends cleanly | End stops the AI mid-sentence and the delivery metrics arrive before the socket closes |
 | Honest metrics | pauses measured by the VAD (Whisper hides silence inside word timings); talk:listen = your speech ÷ (yours + AI's) |
 
 All voice models run **locally via onnxruntime — no torch, no GPU**. Only STT and the LLM call Groq.
@@ -196,8 +197,8 @@ Open the **`converse/`** folder so `.vscode/` is picked up.
 | ▶ Testing panel → **Debug Test** on any test | — | ✅ |
 
 The backend debug config drops `--reload` (the reloader's child process can't be attached).
-Each voice step logs one line (`turn_event reason=…`, `stt_done`, `llm_reply`, `barge_in`,
-`session_metrics`); learner text is only logged at `LOG_LEVEL=DEBUG`.
+Pipecat logs turn start/stop, Smart-Turn verdicts and interruptions; ours adds `llm_reply`,
+`held_unfinished`, `phantom_ignored`, `session_metrics` and `voice_*_error`. No learner text is logged at INFO.
 </details>
 
 <details>
@@ -212,13 +213,12 @@ converse/
 │   │   ├── api/            health · chat (SSE) · agents (/roleplay) · voice (WebSocket)
 │   │   ├── agents/         LangGraph graph (Director, Role-Player, Evaluator) + schemas
 │   │   ├── core/
-│   │   │   ├── model_port.py · voice_port.py      the ports
-│   │   │   ├── providers/  echo · groq · gemini   (ModelPort adapters)
-│   │   │   └── voice/      echo · groq_whisper_stt · kokoro_tts   (STT/TTS adapters)
-│   │   └── voice/          pipeline · turn (VAD + Smart-Turn) · metrics · whisper_features
+│   │   │   ├── model_port.py                       the model port
+│   │   │   └── providers/  echo · groq · gemini   (ModelPort adapters)
+│   │   └── voice/          bot (Pipecat pipeline, STT/TTS) · brain · delivery · metrics · schemas
 │   ├── scripts/voice_client.py    scripted-mic E2E client
-│   ├── tests/              graph · health · voice pipeline · voice WebSocket
-│   └── models/             downloaded ONNX models (gitignored)
+│   ├── tests/              graph · health · voice (metrics) · voice_pipecat · voice WebSocket
+│   └── models/             Kokoro ONNX model (gitignored)
 ├── frontend/               Next.js 15 · Tailwind v4 · motion
 │   ├── components/         Hero · RoleplayStudio · Scorecard · QuickChat · ui
 │   └── lib/                api.ts (HTTP) · voice.ts (mic, WebSocket, playback)
@@ -234,7 +234,7 @@ converse/
 |---|:--:|---|
 | 0 · Foundations — FastAPI, Next.js, provider-swappable `ModelPort` | ✅ | |
 | 1 · Multi-agent text core — LangGraph + LLM-judge scorecard | ✅ | |
-| 2 · Voice — STT → LLM → TTS, turn detection, barge-in, delivery metrics | ✅ | migrating orchestration to Pipecat next |
+| 2 · Voice — STT → LLM → TTS, turn detection, barge-in, delivery metrics | ✅ | on Pipecat; hand-built reference: tag `v0.2-hand-built-voice` |
 | 3–9 · Vision · Evals & CI · Memory · Guardrails · Observability · SaaS · `create-ai-app` | ⬜ | see [TDD.md](TDD.md) §5 |
 
 ## Notes
@@ -242,6 +242,8 @@ converse/
 - **Free tiers drift.** Model IDs and limits change — verify against each provider's console
   before relying on the defaults in `backend/.env.example`. Gemini's free tier trains on inputs
   and isn't available in the EEA/UK; use non-sensitive data.
-- **Python 3.14:** the official `kokoro` package doesn't build (spacy); we use `kokoro-onnx`.
+- **Python 3.14:** the official `kokoro` package doesn't build (spacy); we use `kokoro-onnx`. Pipecat
+  1.15 runs on 3.14, but not its `[kokoro]` extra (pins kokoro-onnx ≥0.5, which caps Python <3.14) —
+  `requirements-voice.txt` installs the working combination.
 - **Deploying:** the frontend fits Vercel; the voice WebSocket needs a persistent host
   (Modal, Fly, a small VM) — not pure serverless.

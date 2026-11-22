@@ -6,7 +6,7 @@ coaches give one vague number; moment-level delivery feedback is what makes the 
 real. All of it falls out of the **word-timestamped** transcripts that Groq Whisper already
 returns (`Transcript.words` — each has `start`/`end` in seconds).
 
-The pipeline collects, per session, a list of the learner's `Transcript`s (their turns) and the
+`delivery.DeliveryTracker` collects, per session, the learner's `Transcript`s (their turns) and the
 total time the agent spoke, then calls `compute_delivery_metrics(...)`.
 """
 
@@ -15,8 +15,7 @@ from __future__ import annotations
 import string
 from collections.abc import Sequence
 
-from ..core.voice_port import Transcript
-from .schemas import DeliveryMetrics
+from .schemas import DeliveryMetrics, Transcript
 
 # Starter filler lexicon — extend/localize (Banglish fillers differ!). Multi-word entries are
 # matched as phrases, so order the detection accordingly.

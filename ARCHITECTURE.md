@@ -227,8 +227,9 @@ for when a paid key exists. An **Echo** adapter runs the whole app at $0 with no
 | **Whisper (STT) + Piper/Kokoro (TTS)** self-host | High quality, licensed for commercial use | Needs a host; more setup/latency work |
 | **Realtime platforms** (LiveKit/Pipecat OSS) | Handles VAD/barge-in/transport | More moving parts; a persistent server |
 
-**Pick (planned):** start **browser Web Speech** (keeps the free demo serverless), upgrade to
-Whisper+Piper/Kokoro when quality/commercial use demands it. Barge-in needs VAD + streaming.
+**Built:** Groq Whisper (STT, word timestamps) + Kokoro (local TTS), first on a hand-built pipeline
+to learn turn-taking and barge-in (tag `v0.2-hand-built-voice`), now orchestrated by **Pipecat**
+with the same LangGraph brain (TDD D9). Barge-in needs VAD + streaming — Pipecat's interruptions.
 
 ### 5.4 Vision *(Phase 3, optional)*
 | Option | Pros | Cons |

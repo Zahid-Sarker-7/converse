@@ -9,8 +9,6 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.main import app
-from app.voice import turn as turn_mod
-from app.voice.turn import TurnDetector
 
 ECHO = {"provider": "echo", "stt": "echo", "tts": "echo"}
 
@@ -50,14 +48,6 @@ def test_end_delivers_metrics_before_close():
         ws.send_text(json.dumps({"type": "end"}))
         types = [e["type"] for e in _events(ws)]
     assert types[-1] == "metrics"
-
-
-def test_turn_is_capped_at_max_length():
-    td = TurnDetector(max_turn_ms=320)
-    td._speech_prob = lambda chunk: 1.0  # endless "speech" (e.g. steady noise)
-    loud = b"\x00\x40" * turn_mod.CHUNK_SAMPLES
-    kinds = [e.kind for _ in range(12) if (e := td.feed(loud))]
-    assert kinds[:2] == ["speech_started", "speech_ended"]  # forced end at 10 chunks = 320ms
 
 
 def test_typed_text_mid_session_gets_a_reply():
