@@ -1,19 +1,18 @@
-"""Voice on Pipecat (app/voice/bot.py) — the migration's acceptance harness.
+"""Voice on Pipecat (app/voice/bot.py, brain.py, delivery.py): the pieces in isolation.
 
-Plumbing tests run now. The two hands-on TODOs are skip-gated, as in Phase 2: delete the
-`@TODO_*` line above a test, run `make test`, make it green. When both TODOs are done, also
-un-gate the pipecat half of `test_voice_ws.py` (the cutover gate) — see TDD §Pipecat migration.
+Processors run through `pipecat.tests.utils.run_test` (a real mini-pipeline) or a direct
+`process_frame` call; all keyless, via the echo LLM. The WebSocket contract is in test_voice_ws.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import wave
 
 import pytest
-
-pytest.importorskip("pipecat")
-
-from pipecat.frames.frames import (  # noqa: E402
+from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     EndFrame,
@@ -26,24 +25,20 @@ from pipecat.frames.frames import (  # noqa: E402
     OutputAudioRawFrame,
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
+    UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
-from pipecat.processors.aggregators.llm_context import LLMContext  # noqa: E402
-from pipecat.processors.frame_processor import FrameDirection  # noqa: E402
-from pipecat.tests.utils import SleepFrame, run_test  # noqa: E402
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameDirection
+from pipecat.tests.utils import SleepFrame, run_test
 
-from app.agents.schemas import SAMPLE_SCENARIO  # noqa: E402
-from app.core.providers.echo_adapter import EchoAdapter  # noqa: E402
-from app.core.voice_port import Transcript, Word  # noqa: E402
-from app.voice import bot  # noqa: E402
-from app.voice.brain import ConverseBrain, to_chat_messages  # noqa: E402
-from app.voice.delivery import DeliveryTracker  # noqa: E402
-
-TODO_BRAIN = pytest.mark.skip(reason="TODO #1 (ConverseBrain) — delete this line when you start it")
-TODO_TRACKER = pytest.mark.skip(
-    reason="TODO #2 (DeliveryTracker) — delete this line when you start it"
-)
+from app.agents.schemas import SAMPLE_SCENARIO
+from app.core.providers.echo_adapter import EchoAdapter
+from app.voice import bot
+from app.voice.brain import ConverseBrain, to_chat_messages
+from app.voice.delivery import DeliveryTracker
+from app.voice.schemas import Transcript, Word
 
 
 def _events(frames) -> list[dict]:
@@ -64,7 +59,7 @@ def _words(text: str, start: float = 0.0, step: float = 0.3) -> Transcript:
     )
 
 
-# ── plumbing (AI-implemented) ──────────────────────────────────────────────────────────────────
+# ── plumbing ──────────────────────────────────────────────────────────────────
 
 
 def test_serializer_speaks_the_unchanged_wire_protocol():
@@ -106,10 +101,35 @@ def test_whisper_phantoms_are_dropped_but_real_short_answers_kept():
 def test_turn_taking_keeps_the_hand_tuned_calibration():
     p = bot.user_turn_params()
     vad = p.vad_analyzer.params
-    assert (vad.start_secs, vad.stop_secs, vad.confidence) == (0.2, 0.5, 0.5)
+    assert (vad.start_secs, vad.stop_secs, vad.confidence) == (0.2, 0.3, 0.5)
     (stop,) = p.user_turn_strategies.stop
     assert type(stop._turn_analyzer).__name__ == "LocalSmartTurnAnalyzerV3"
     assert stop._turn_analyzer.params.stop_secs == 3.0
+
+
+@pytest.mark.skipif(not shutil.which("say"), reason="needs macOS `say` for real speech")
+def test_real_models_keep_a_thinking_pause_inside_one_turn(tmp_path):
+    """REAL Silero + Smart-Turn with our calibration: an unfinished clause + 1s pause must NOT end
+    the turn; the real end must. (With VAD stop 0.5s this split into two turns.) Runs in real time:
+    the VAD and Smart-Turn timers are wall-clock."""
+    from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+
+    wav = tmp_path / "turn.wav"
+    phrase = "The main reason we did it was because [[slnc 1000]] the old database could not scale."
+    subprocess.run(["say", "-o", str(wav), "--data-format=LEI16@16000", phrase], check=True)
+    pcm = wave.open(str(wav)).readframes(10**9) + b"\0\0" * 16_000 * 2  # 2s trailing silence
+    frames = []
+    for i in range(0, len(pcm), 640):  # 20ms mic frames, paced like a real mic
+        frames += [InputAudioRawFrame(pcm[i : i + 640], 16_000, 1), SleepFrame(0.02)]
+
+    user = LLMContextAggregatorPair(LLMContext(), user_params=bot.user_turn_params()).user()
+    down, _ = asyncio.run(run_test(Pipeline([bot.EchoSTT(), user]), frames_to_send=frames))
+    turns = [
+        type(f) for f in down if isinstance(f, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame))
+    ]
+    assert turns == [UserStartedSpeakingFrame, UserStoppedSpeakingFrame]
 
 
 def test_context_becomes_graph_messages_with_unanswered_lines_joined():
@@ -126,7 +146,7 @@ def test_context_becomes_graph_messages_with_unanswered_lines_joined():
     assert msgs[1].content == "And for the stakeholders, we had to... write a weekly status report."
 
 
-# ── TODO #1 — ConverseBrain ────────────────────────────────────────────────────────────────────
+# ── ConverseBrain ────────────────────────────────────────────────────────────────────
 
 
 def _brain() -> ConverseBrain:
@@ -179,7 +199,7 @@ def test_unfinished_turn_waits_and_an_interruption_cancels_the_wait(monkeypatch)
     assert replies == ["echo> And for the stakeholders, we had to... write a weekly status report."]
 
 
-# ── TODO #2 — DeliveryTracker ──────────────────────────────────────────────────────────────────
+# ── DeliveryTracker ──────────────────────────────────────────────────────────────────
 
 
 def test_tracker_turns_frames_into_delivery_metrics(monkeypatch):
@@ -197,9 +217,13 @@ def test_tracker_turns_frames_into_delivery_metrics(monkeypatch):
         (VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=12.2), up),  # spoke at 12.0 → 1.0s
         (TranscriptionFrame(turn1.text, "u", "t", result=turn1), FrameDirection.DOWNSTREAM),
         (VADUserStoppedSpeakingFrame(stop_secs=0.5, timestamp=13.5), up),
-        (BotStartedSpeakingFrame(), up),  # the agent takes the floor: not a pause
+        (UserStoppedSpeakingFrame(), up),  # turn over: the wait for the agent is not a pause
+        (BotStartedSpeakingFrame(), up),
         (BotStoppedSpeakingFrame(), up),
         (VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=30.2), up),  # 17s later: listening
+        (VADUserStoppedSpeakingFrame(stop_secs=0.5, timestamp=31.5), up),
+        (UserStoppedSpeakingFrame(), up),  # ended before the agent spoke (thinking / slow TTS)…
+        (VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=36.2), up),  # …so 5s isn't a pause
         (TranscriptionFrame(turn2.text, "u", "t", result=turn2), FrameDirection.DOWNSTREAM),
     ]
 

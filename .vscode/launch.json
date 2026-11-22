@@ -13,19 +13,7 @@
       "console": "integratedTerminal"
     },
     {
-      "name": "Backend: FastAPI — Pipecat engine (debug)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "uvicorn",
-      "args": ["app.main:app", "--port", "8000"],
-      "cwd": "${workspaceFolder}/backend",
-      "python": "${workspaceFolder}/backend/.venv/bin/python",
-      "env": { "VOICE_ENGINE": "pipecat" },
-      "justMyCode": false,
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Tests: Pipecat voice (debug)",
+      "name": "Tests: voice pipeline (debug)",
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",

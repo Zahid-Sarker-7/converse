@@ -27,10 +27,52 @@ from ..agents.graph import build_graph
 from ..agents.schemas import ScenarioConfig
 from ..core.model_port import ChatMessage, ModelPort, Role
 from ..logging import get_logger
-from .pipeline import UNFINISHED_HOLD_S, VOICE_STYLE, _looks_unfinished
 from .schemas import VoiceEvent
 
 log = get_logger("voice")
+
+VOICE_STYLE = (
+    "You are speaking aloud on a live voice call: reply in one to three short, natural spoken "
+    "sentences. Never use markdown, bullet points, headings, numbered lists, or emoji."
+)
+
+# Second opinion on "is the turn over?", from the words: a transcript ending mid-thought ("we had
+# to...") means the acoustic detector ended the turn early (often the 3s silence fallback during a
+# thinking pause). Hold before answering; resumed speech barges into the hold and merges.
+UNFINISHED_HOLD_S = 3.0
+_DANGLING = {
+    "and",
+    "but",
+    "so",
+    "or",
+    "because",
+    "to",
+    "the",
+    "a",
+    "an",
+    "of",
+    "with",
+    "for",
+    "that",
+    "which",
+    "um",
+    "uh",
+    "like",
+    "is",
+    "was",
+    "we",
+    "i",
+    "my",
+    "our",
+}
+
+
+def _looks_unfinished(text: str) -> bool:
+    t = text.strip()
+    if t.endswith(("...", "…", ",", "-", "—")):
+        return True
+    words = t.rstrip(".!?").split()
+    return bool(words) and not t.endswith(("?", "!")) and words[-1].lower().strip(",") in _DANGLING
 
 
 def to_chat_messages(context_messages: list[dict]) -> list[ChatMessage]:
@@ -66,7 +108,7 @@ class ConverseBrain(FrameProcessor):
 
         No task, no cancel, no barge-in code: when the learner talks over the agent, Pipecat sends
         an `InterruptionFrame` and cancels whatever this method is awaiting (the graph call or the
-        unfinished-hold sleep). Compare `_respond_task` + `_barge_in` in the hand-built engine.
+        unfinished-hold sleep). The hand-built engine needed `_respond_task` + `_barge_in` for this.
         """
         await super().process_frame(frame, direction)
         if not isinstance(frame, LLMContextFrame):

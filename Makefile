@@ -28,13 +28,9 @@ setup-frontend: ## install frontend deps, seed .env.local
 providers: ## install provider SDKs (do this when starting the adapter TODOs)
 	$(BIN)/pip install -r $(BACKEND)/requirements-providers.txt
 
-voice: ## install voice deps + download Silero, Smart-Turn & Kokoro (TTS) models
+voice: ## install Kokoro TTS + download its model (Silero/Smart-Turn ship inside pipecat-ai)
 	$(BIN)/pip install -r $(BACKEND)/requirements-voice.txt
 	@mkdir -p $(BACKEND)/models
-	@test -f $(BACKEND)/models/silero_vad.onnx || curl -sL -o $(BACKEND)/models/silero_vad.onnx \
-		https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
-	@test -f $(BACKEND)/models/smart-turn-v3.2-cpu.onnx || curl -sL -o $(BACKEND)/models/smart-turn-v3.2-cpu.onnx \
-		https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx
 	@test -f $(BACKEND)/models/kokoro-v1.0.int8.onnx || curl -sL -o $(BACKEND)/models/kokoro-v1.0.int8.onnx \
 		$(KOKORO_URL)/kokoro-v1.0.int8.onnx
 	@test -f $(BACKEND)/models/voices-v1.0.bin || curl -sL -o $(BACKEND)/models/voices-v1.0.bin \

@@ -9,6 +9,26 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+# Audio conventions, fixed once: mic in = 16 kHz mono PCM16 LE (what Silero, Smart-Turn and Whisper
+# expect); speech out = 24 kHz mono PCM16 LE (Kokoro's native rate). The browser resamples.
+STT_SAMPLE_RATE = 16_000
+TTS_SAMPLE_RATE = 24_000
+
+
+class Word(BaseModel):
+    """One transcribed word with timing — the raw material for delivery metrics."""
+
+    text: str
+    start: float  # seconds from the start of the utterance
+    end: float
+
+
+class Transcript(BaseModel):
+    """One learner turn as STT heard it (rides on `TranscriptionFrame.result`)."""
+
+    text: str
+    words: list[Word] = Field(default_factory=list)  # empty if the STT has no timestamps
+
 
 class DeliveryMetrics(BaseModel):
     """How the learner *spoke* (not what they said) — derived from word-timestamped STT.

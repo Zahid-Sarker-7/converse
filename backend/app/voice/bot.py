@@ -1,7 +1,7 @@
-"""Voice on Pipecat — the Phase-2 pipeline rebuilt on a framework (Decision 2026-11-01).
+"""Voice on Pipecat — the Phase-2 pipeline on a framework (Decision 2026-11-01, TDD D9).
 
-Same wire protocol, same brain, same metrics as the hand-built engine (`pipeline.py` + `turn.py`,
-tag `v0.2-hand-built-voice`). What changed is who owns the plumbing:
+Same wire protocol, brain and metrics as the hand-built engine it replaced (tag
+`v0.2-hand-built-voice`: `pipeline.py` + `turn.py`). What changed is who owns the plumbing:
 
   WS ─► transport.input ─► STT ─► VoiceEvents ─► DeliveryTracker ─► user aggregator
         (ConverseSerializer)                                       (Silero VAD + Smart-Turn v3)
@@ -16,8 +16,10 @@ mechanism replaces `_respond_task`, `_barge_in`, `_drop_queued_audio` and the ca
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import string
+from pathlib import Path
 
 from fastapi import WebSocket
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
@@ -60,15 +62,39 @@ from pipecat.workers.runner import WorkerRunner
 
 from ..agents.schemas import ScenarioConfig
 from ..core.model_port import ChatMessage, ModelPort
-from ..core.voice.groq_whisper_stt import WHISPER_PROMPT
-from ..core.voice_port import STT_SAMPLE_RATE, TTS_SAMPLE_RATE, Transcript, Word
 from ..logging import get_logger
 from .brain import ConverseBrain
 from .delivery import DeliveryTracker
-from .pipeline import PHANTOM_MAX_SPEECH_MS, WHISPER_PHANTOMS
-from .schemas import VoiceEvent
+from .schemas import STT_SAMPLE_RATE, TTS_SAMPLE_RATE, Transcript, VoiceEvent, Word
 
 log = get_logger("voice")
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models"  # backend/models (`make voice`)
+KOKORO_MODEL = MODELS_DIR / "kokoro-v1.0.int8.onnx"
+KOKORO_VOICES = MODELS_DIR / "voices-v1.0.bin"
+
+# Whisper is trained to write clean prose, so it silently drops "um/uh" — which zeroed the filler
+# metric and hid hesitations from the judge. A prompt is style context, not an instruction: one
+# written WITH fillers biases verbatim output (OpenAI docs: prompting for "filler words"), and a
+# spelling list fixes terms it mangled ("RAC"→RAG, "Popsub"→Pub/Sub). Limit: 224 tokens.
+WHISPER_PROMPT = (
+    "Umm, so, uh, I was like, hmm... you know, I mean, we, um, used Pub/Sub, RAG, MCP, "
+    "Kubernetes, PostgreSQL, Redis, Kafka, gRPC, LLM, API, and, uh, CI/CD."
+)
+
+# Whisper invents these on non-speech audio (verified: silence and keyboard noise → "Thank you.").
+# Groq returns no_speech_prob=0, so the usual confidence filter is unavailable; drop them when the
+# turn was short. ponytail: a genuinely spoken brief "thank you" is dropped too (logged).
+WHISPER_PHANTOMS = {
+    "thank you",
+    "thanks",
+    "thanks for watching",
+    "thank you for watching",
+    "you",
+    "bye",
+    "",
+}
+PHANTOM_MAX_SPEECH_MS = 1200
 
 
 def event_frame(event: VoiceEvent) -> OutputTransportMessageUrgentFrame:
@@ -192,6 +218,18 @@ class EchoTTS(TTSService):
             )
 
 
+def voice_providers(settings) -> dict[str, list[str]]:
+    """Which STT/TTS names a session may ask for. Echo always works (no keys, no downloads); the
+    real ones appear when their prerequisite exists, so a fresh checkout still boots."""
+    kokoro = (
+        importlib.util.find_spec("kokoro_onnx") and KOKORO_MODEL.exists() and KOKORO_VOICES.exists()
+    )
+    return {
+        "stt": ["echo"] + (["groq"] if settings.groq_api_key else []),
+        "tts": ["echo"] + (["kokoro"] if kokoro else []),
+    }
+
+
 def make_stt(name: str, settings) -> SegmentedSTTService:
     if name == "groq":
         return GroqWordsSTT(api_key=settings.groq_api_key, model=settings.whisper_model)
@@ -202,12 +240,10 @@ def make_tts(name: str, settings) -> TTSService:
     if name == "kokoro":
         from pipecat.services.kokoro.tts import KokoroTTSService
 
-        from ..core.voice.kokoro_tts import MODEL_PATH, VOICES_PATH
-
         # ponytail: loads the model per session (0.3s, measured); share one if sessions pile up.
         return KokoroTTSService(
-            model_path=str(MODEL_PATH),
-            voices_path=str(VOICES_PATH),
+            model_path=str(KOKORO_MODEL),
+            voices_path=str(KOKORO_VOICES),
             settings=KokoroTTSService.Settings(voice=settings.kokoro_voice),
         )
     return EchoTTS()
@@ -266,17 +302,19 @@ class VoiceEvents(FrameProcessor):
 # ── assembly ───────────────────────────────────────────────────────────────────────────────────
 
 
-def user_turn_params() -> LLMUserAggregatorParams:
+def user_turn_params(vad_stop_secs: float = 0.3) -> LLMUserAggregatorParams:
     """The turn-taking calibration that was hand-tuned in `turn.py`, as Pipecat knobs.
 
     VAD start 0.2s = the 200ms barge-in guard (a cough or "mm-hm" doesn't interrupt).
-    VAD stop 0.5s  = Smart-Turn is asked after 0.5s of silence (0.2s cut people off, live).
+    VAD stop 0.3s  = Smart-Turn is asked after 0.3s of silence. It was trained on ~0.2s of trailing
+                     silence: at 0.5s (the hand-built endpoint) it called a mid-thought pause
+                     "complete" and split the answer (measured, see the real-model test).
     Smart-Turn stop 3.0s = give up waiting even if it says "incomplete".
     ponytail: no 60s turn cap (steady noise grows a turn forever); add a watchdog if seen live.
     """
     return LLMUserAggregatorParams(
         vad_analyzer=SileroVADAnalyzer(
-            params=VADParams(confidence=0.5, start_secs=0.2, stop_secs=0.5)
+            params=VADParams(confidence=0.5, start_secs=0.2, stop_secs=vad_stop_secs)
         ),
         user_turn_strategies=UserTurnStrategies(
             stop=[

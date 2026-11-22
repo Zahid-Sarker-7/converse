@@ -47,12 +47,9 @@ class Settings(BaseSettings):
     # STT/TTS pick their adapter the same way chat picks a provider. "echo" needs no keys and
     # runs the whole voice pipeline at $0 (silent audio). Switch to groq/kokoro once ready.
     voice_stt_provider: str = "echo"  # echo | groq (Whisper, free tier — needs GROQ_API_KEY)
-    voice_tts_provider: str = "echo"  # echo | kokoro (local, Apache-2.0 — pip install kokoro)
+    voice_tts_provider: str = "echo"  # echo | kokoro (local, Apache-2.0 — `make voice`)
     whisper_model: str = "whisper-large-v3-turbo"  # Groq STT model (free tier)
     kokoro_voice: str = "af_heart"  # Kokoro voice id (a=American English)
-    # handbuilt = app/voice/pipeline.py (tag v0.2-hand-built-voice) · pipecat = app/voice/bot.py.
-    # Strangler switch for the migration: flip to pipecat once its TODOs + tests are green.
-    voice_engine: str = "handbuilt"
 
 
 @lru_cache

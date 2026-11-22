@@ -1,8 +1,7 @@
 """DeliveryTracker — collects delivery-metric inputs from the Pipecat frame stream.
 
-The maths is unchanged (`metrics.compute_delivery_metrics`, your Phase-2 TODO #3); only its
-*inputs* now come from frames instead of the hand-built pipeline's own bookkeeping
-(`pipeline.learner_turns`, `_agent_speaking_s`, `TurnDetector.longest_pause_ms`).
+The maths is `metrics.compute_delivery_metrics`; its inputs come from frames (the hand-built
+engine, tag `v0.2-hand-built-voice`, kept this bookkeeping inside its own pipeline).
 
 Where it sits (bot.py): transport.input → STT → VoiceEvents → **DeliveryTracker** → user aggregator.
 So it sees transcripts going DOWN, and the VAD + bot-speaking frames that the aggregator and the
@@ -19,14 +18,17 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     TranscriptionFrame,
+    UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from ..core.voice_port import Transcript
+from ..logging import get_logger
 from .metrics import compute_delivery_metrics
-from .schemas import VoiceEvent
+from .schemas import Transcript, VoiceEvent
+
+log = get_logger("voice")
 
 
 class DeliveryTracker(FrameProcessor):
@@ -35,8 +37,10 @@ class DeliveryTracker(FrameProcessor):
       learner turns  ← TranscriptionFrame.result (word-timestamped; typed turns never produce one)
       agent speech   ← BotStarted → BotStoppedSpeaking (an interruption ends it early: barge-in
                        is counted correctly for free)
-      longest pause  ← VAD quiet (stopped → next started) while the learner holds the floor;
-                       Whisper swallows silence into word timings, so pauses come from the VAD
+      longest pause  ← VAD quiet (stopped → next started) WITHIN one user turn: the end of a turn
+                       clears it, so endpointing waits and agent latency never count (a live run
+                       read 5.28s that way); Whisper swallows silence into word timings, so pauses
+                       come from the VAD
     On EndFrame the metrics event goes out first, so it reaches the browser before the close.
     """
 
@@ -60,6 +64,8 @@ class DeliveryTracker(FrameProcessor):
                 pause = frame.timestamp - frame.start_secs - self._quiet_since
                 self.longest_pause_s = max(self.longest_pause_s, pause)
             self._quiet_since = None
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            self._quiet_since = None  # the turn is over: what follows is the agent's floor
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_since = time.time()
             self._quiet_since = None  # the agent took the floor: what follows is listening
@@ -71,5 +77,6 @@ class DeliveryTracker(FrameProcessor):
 
             metrics = compute_delivery_metrics(self.learner_turns, self.agent_speaking_s)
             metrics.longest_pause_s = round(self.longest_pause_s, 2)
+            log.info("session_metrics", turns=len(self.learner_turns), **metrics.model_dump())
             await self.push_frame(event_frame(VoiceEvent(type="metrics", metrics=metrics)))
         await self.push_frame(frame, direction)

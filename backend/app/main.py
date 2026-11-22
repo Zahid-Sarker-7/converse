@@ -13,8 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import agents, chat, health, voice
 from .config import get_settings
 from .core.providers import build_registry
-from .core.voice import build_stt_registry, build_tts_registry
 from .logging import configure_logging, get_logger
+from .voice.bot import voice_providers
 
 
 @asynccontextmanager
@@ -24,15 +24,13 @@ async def lifespan(app: FastAPI):
     registry = build_registry(settings)
     app.state.settings = settings
     app.state.registry = registry
-    app.state.stt_registry = build_stt_registry(settings)
-    app.state.tts_registry = build_tts_registry(settings)
+    app.state.voice_providers = voice_providers(settings)
 
     log = get_logger("converse")
     log.info(
         "startup",
         providers=list(registry.keys()),
-        stt=list(app.state.stt_registry.keys()),
-        tts=list(app.state.tts_registry.keys()),
+        **app.state.voice_providers,
         default_provider=settings.default_provider,
         environment=settings.environment,
     )
